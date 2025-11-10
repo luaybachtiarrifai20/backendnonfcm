@@ -1,0 +1,155 @@
+# Laravel Application Patterns & Best Practices
+
+## Architecture Rules
+- Use modular architecture with clear domain boundaries
+- Implement Domain-Driven Design principles
+- Separate concerns between Application and Domain layers
+- Use constructor injection for all dependencies
+
+## Module Structure
+```
+app/Modules/{ModuleName}/
+├── Application/
+│   ├── Http/
+│   │   ├── Controllers/      # REST controllers
+│   │   ├── Requests/         # Form request validation
+│   │   ├── Resources/        # API response resources
+│   │   └── Services/         # HTTP-specific services
+│   └── Services/             # Application services
+└── Domain/
+    ├── Actions/              # Domain use cases with __invoke
+    ├── Enums/                # Domain-specific enums
+    ├── Models/               # Eloquent models
+    └── Repositories/         # Data access interfaces
+```
+
+## Code Standards
+- Always use `declare(strict_types=1);`
+- Use type hints for all parameters and return types
+- Use `readonly` classes where appropriate
+- Use constructor property promotion
+- Use `__invoke` method for Actions
+- Use DTOs for data transfer with `toArray()` methods
+
+## Database Standards
+- Use enums for column names and values
+- Use `mysql_maxscale` connection for DB operations
+- Never add foreign key constraints
+- Use proper index naming: `idx_` for normal, `unique_idx_` for unique
+- Use UUIDs with `HasUuid` trait
+
+## API Design
+- Use dedicated request classes for validation
+- Use resource classes for responses
+- Keep controllers thin with service delegation
+- Use service layer for business logic
+
+## Action Pattern
+- Use `__invoke` method for domain actions
+- Pass DTOs to actions for type safety
+- Handle business logic and side effects in actions
+- Use naming: `{Entity}{Action}Action`
+
+## DTO Pattern
+- Extend Spatie Laravel Data for basic DTOs
+- Implement `Arrayable` interface for complex DTOs
+- Use `toArray()` method for database operations
+- Use type annotations for better IDE support
+
+## Testing
+- Write both unit and integration tests
+- Use factories for test data
+- Mock external dependencies
+- Test business logic thoroughly
+```
+
+## 🎯 Step-by-Step Implementation
+
+### 1. Create Your First Module
+
+When you want to create a new module (e.g., `Product`), tell Cursor:
+
+```
+Create a Product module following the Laravel patterns guide:
+- Create the module structure with Application and Domain layers
+- Add a Product model with proper enums for columns
+- Create a ProductCreateAction with __invoke method
+- Add ProductCreateDTO with toArray method
+- Create ProductController with thin implementation
+- Add ProductStoreRequest with validation
+- Create ProductResource for API responses
+```
+
+### 2. Database Migration Example
+
+```
+Create a migration for products table following the database patterns:
+- Use enum references for column names
+- Add proper indexes with naming conventions
+- Use UUID for external identification
+- Follow the migration standards from the guide
+```
+
+### 3. API Endpoint Creation
+
+```
+Create a complete API endpoint for products following the patterns:
+- ProductController with store method
+- ProductStoreRequest with validation rules
+- ProductStoreService for business logic
+- ProductCreateAction for domain logic
+- ProductCreateDTO for data transfer
+- ProductResource for API response
+```
+
+## 🔧 Cursor AI Prompts for Common Tasks
+
+### Creating a New Entity
+
+```
+Create a {EntityName} module following the Laravel patterns guide:
+
+1. Domain Layer:
+   - {EntityName} model with proper enums
+   - {EntityName}CreateAction with __invoke method
+   - {EntityName}CreateDTO extending Spatie Laravel Data
+   - {EntityName}Repository interface
+
+2. Application Layer:
+   - {EntityName}Controller with CRUD methods
+   - {EntityName}StoreRequest with validation
+   - {EntityName}UpdateRequest with validation
+   - {EntityName}Resource for API responses
+   - {EntityName}StoreService for business logic
+
+3. Database:
+   - Migration with enum column references
+   - Proper indexes and UUID support
+```
+
+### Creating API Endpoints
+
+```
+Create API endpoints for {EntityName} following the patterns:
+
+1. Routes in api.php with proper grouping
+2. Controller methods: index, store, show, update, destroy
+3. Request classes with validation rules
+4. Service classes for business logic
+5. Resource classes for responses
+6. Action classes for domain logic
+7. DTO classes for data transfer
+
+Follow the thin controller pattern and use dependency injection.
+```
+
+### Database Operations
+
+```
+Create database operations for {EntityName}:
+
+1. Migration with proper enum column references
+2. Model with HasUuid trait and proper relationships
+3. Repository with interface and implementation
+4. Action classes for CRUD operations
+5. DTO classes for data transfer
