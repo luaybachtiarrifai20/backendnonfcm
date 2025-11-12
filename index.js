@@ -14,6 +14,23 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
+
+
+// Helper function untuk menonaktifkan token yang tidak valid
+const deactivateToken = async (token) => {
+  try {
+    const connection = await getConnection();
+    await connection.execute(
+      "UPDATE fcm_tokens SET is_active = FALSE WHERE token = ?",
+      [token]
+    );
+    await connection.end();
+    console.log("Token dinonaktifkan:", token);
+  } catch (error) {
+    console.error("Error menonaktifkan token:", error);
+  }
+};
+
 // Konfigurasi database langsung (ganti dengan nilai yang sesuai)
 const dbConfig = {
   host: process.env.DB_HOST,
@@ -21,10 +38,81 @@ const dbConfig = {
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
   port: process.env.DB_PORT || 3306, // default value jika tidak ada
-  timezone: '+07:00', // Set timezone to Asia/Jakarta (WIB)
+  timezone: "+07:00", // Set timezone to Asia/Jakarta (WIB)
 };
 
 const JWT_SECRET = "secret_key_yang_aman_dan_unik";
+
+// Tambahkan di bagian atas file setelah import lainnya
+const admin = require("firebase-admin");
+
+// Inisialisasi Firebase Admin
+const serviceAccount = require("./serviceAccountKey.json"); // Sesuaikan path
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  databaseURL: "https://managemen-sekolah-f352d-default-rtdb.asia-southeast1.firebasedatabase.app/", // Updated to match Flutter app Firebase project
+});
+
+// Helper function untuk mengirim notifikasi
+const sendNotification = async (token, title, body, data = {}) => {
+  try {
+    const message = {
+      token: token,
+      notification: {
+        title: title,
+        body: body,
+      },
+      data: data,
+      android: {
+        priority: "high",
+      },
+      apns: {
+        payload: {
+          aps: {
+            contentAvailable: true,
+            badge: 1,
+            sound: "default",
+          },
+        },
+      },
+    };
+
+    const response = await admin.messaging().send(message);
+    console.log("Notifikasi berhasil dikirim:", response);
+    return { success: true, response };
+  } catch (error) {
+    console.error("Error mengirim notifikasi:", error);
+
+    // Jika token tidak valid, nonaktifkan token
+    if (error.code === "messaging/registration-token-not-registered") {
+      await deactivateToken(token);
+    }
+
+    return { success: false, error: error.message };
+  }
+};
+
+// Helper function untuk mengirim notifikasi ke multiple devices
+const sendNotificationToMultiple = async (tokens, title, body, data = {}) => {
+  try {
+    const message = {
+      tokens: tokens,
+      notification: {
+        title: title,
+        body: body,
+      },
+      data: data,
+    };
+
+    const response = await admin.messaging().sendEachForMulticast(message);
+    console.log("Notifikasi multicast berhasil dikirim:", response);
+    return { success: true, response };
+  } catch (error) {
+    console.error("Error mengirim notifikasi multicast:", error);
+    return { success: false, error: error.message };
+  }
+};
 
 // Middleware untuk koneksi database dengan error handling
 async function getConnection() {
@@ -550,6 +638,595 @@ app.post("/api/login", async (req, res) => {
     res.status(500).json({ error: "Terjadi kesalahan server saat login" });
   }
 });
+
+// Endpoint untuk menyimpan FCM token
+app.post("/api/fcm/token", authenticateTokenAndSchool, async (req, res) => {
+  try {
+    const { token, device_type = "web" } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ error: "Token diperlukan" });
+    }
+
+    const connection = await getConnection();
+
+    // Cek apakah token sudah ada
+    const [existing] = await connection.execute(
+      "SELECT id FROM fcm_tokens WHERE user_id = ? AND token = ?",
+      [req.user.id, token]
+    );
+
+    if (existing.length > 0) {
+      // Update jika sudah ada
+      await connection.execute(
+        "UPDATE fcm_tokens SET is_active = TRUE, device_type = ?, updated_at = NOW() WHERE user_id = ? AND token = ?",
+        [device_type, req.user.id, token]
+      );
+    } else {
+      // Insert baru
+      const id = crypto.randomUUID();
+      await connection.execute(
+        "INSERT INTO fcm_tokens (id, user_id, token, device_type) VALUES (?, ?, ?, ?)",
+        [id, req.user.id, token, device_type]
+      );
+    }
+
+    await connection.end();
+
+    res.json({ message: "Token berhasil disimpan" });
+  } catch (error) {
+    console.error("ERROR SAVE FCM TOKEN:", error.message);
+    res.status(500).json({ error: "Gagal menyimpan token" });
+  }
+});
+
+// Endpoint untuk menghapus FCM token (saat logout)
+app.delete("/api/fcm/token", authenticateTokenAndSchool, async (req, res) => {
+  try {
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({ error: "Token diperlukan" });
+    }
+
+    const connection = await getConnection();
+    await connection.execute(
+      "UPDATE fcm_tokens SET is_active = FALSE WHERE user_id = ? AND token = ?",
+      [req.user.id, token]
+    );
+    await connection.end();
+
+    res.json({ message: "Token berhasil dihapus" });
+  } catch (error) {
+    console.error("ERROR DELETE FCM TOKEN:", error.message);
+    res.status(500).json({ error: "Gagal menghapus token" });
+  }
+});
+
+// Endpoint untuk mendapatkan tokens by user_id
+const getUserFCMTokens = async (userId) => {
+  try {
+    const connection = await getConnection();
+    const [tokens] = await connection.execute(
+      "SELECT token FROM fcm_tokens WHERE user_id = ? AND is_active = TRUE",
+      [userId]
+    );
+    await connection.end();
+    return tokens.map((t) => t.token);
+  } catch (error) {
+    console.error("ERROR GET USER FCM TOKENS:", error.message);
+    return [];
+  }
+};
+
+// Endpoint untuk mendapatkan tokens by role (untuk broadcast)
+const getFCMTokensByRole = async (role, sekolah_id = null) => {
+  try {
+    const connection = await getConnection();
+
+    let query = `
+      SELECT DISTINCT ft.token 
+      FROM fcm_tokens ft
+      JOIN users u ON ft.user_id = u.id
+      WHERE ft.is_active = TRUE AND u.role = ?
+    `;
+    let params = [role];
+
+    if (sekolah_id) {
+      query += " AND u.sekolah_id = ?";
+      params.push(sekolah_id);
+    }
+
+    const [tokens] = await connection.execute(query, params);
+    await connection.end();
+    return tokens.map((t) => t.token);
+  } catch (error) {
+    console.error("ERROR GET FCM TOKENS BY ROLE:", error.message);
+    return [];
+  }
+};
+
+// Endpoint untuk mengirim notifikasi pengumuman
+app.post(
+  "/api/notifications/pengumuman",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      const { title, body, target_users, data = {} } = req.body;
+
+      if (!title || !body) {
+        return res.status(400).json({ error: "Title dan body diperlukan" });
+      }
+
+      let tokens = [];
+
+      if (target_users && Array.isArray(target_users)) {
+        // Kirim ke user tertentu
+        for (const userId of target_users) {
+          const userTokens = await getUserFCMTokens(userId);
+          tokens = tokens.concat(userTokens);
+        }
+      } else {
+        // Kirim ke semua user di sekolah
+        const connection = await getConnection();
+        const [users] = await connection.execute(
+          "SELECT id FROM users WHERE sekolah_id = ?",
+          [req.sekolah_id]
+        );
+        await connection.end();
+
+        for (const user of users) {
+          const userTokens = await getUserFCMTokens(user.id);
+          tokens = tokens.concat(userTokens);
+        }
+      }
+
+      // Hapus duplikat
+      tokens = [...new Set(tokens)];
+
+      if (tokens.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "Tidak ada token aktif yang ditemukan" });
+      }
+
+      // Tambahkan data tambahan
+      const notificationData = {
+        type: "pengumuman",
+        sekolah_id: req.sekolah_id,
+        timestamp: new Date().toISOString(),
+        ...data,
+      };
+
+      const result = await sendNotificationToMultiple(
+        tokens,
+        title,
+        body,
+        notificationData
+      );
+
+      // Simpan ke history notifications
+      if (target_users && Array.isArray(target_users)) {
+        const connection = await getConnection();
+        for (const userId of target_users) {
+          const notifId = crypto.randomUUID();
+          await connection.execute(
+            "INSERT INTO notifications (id, user_id, title, body, type, data) VALUES (?, ?, ?, ?, 'pengumuman', ?)",
+            [notifId, userId, title, body, JSON.stringify(notificationData)]
+          );
+        }
+        await connection.end();
+      }
+
+      res.json({
+        message: "Notifikasi pengumuman berhasil dikirim",
+        sent_count: tokens.length,
+        result: result,
+      });
+    } catch (error) {
+      console.error("ERROR SEND PENGUMUMAN NOTIFICATION:", error.message);
+      res.status(500).json({ error: "Gagal mengirim notifikasi pengumuman" });
+    }
+  }
+);
+
+// Endpoint untuk notifikasi tagihan
+app.post(
+  "/api/notifications/tagihan",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      const {
+        siswa_id,
+        title,
+        body,
+        jumlah_tagihan,
+        jatuh_tempo,
+        data = {},
+      } = req.body;
+
+      if (!siswa_id || !title || !body) {
+        return res
+          .status(400)
+          .json({ error: "Siswa ID, title, dan body diperlukan" });
+      }
+
+      // Dapatkan user_id wali dari siswa
+      const connection = await getConnection();
+      const [wali] = await connection.execute(
+        "SELECT u.id as user_id FROM users u WHERE u.siswa_id = ? AND u.role = 'wali'",
+        [siswa_id]
+      );
+
+      if (wali.length === 0) {
+        await connection.end();
+        return res
+          .status(404)
+          .json({ error: "User wali tidak ditemukan untuk siswa ini" });
+      }
+
+      const waliUserId = wali[0].user_id;
+      const tokens = await getUserFCMTokens(waliUserId);
+
+      if (tokens.length === 0) {
+        await connection.end();
+        return res
+          .status(400)
+          .json({ error: "Tidak ada token aktif untuk wali" });
+      }
+
+      // Data notifikasi tagihan
+      const notificationData = {
+        type: "tagihan",
+        siswa_id: siswa_id,
+        jumlah_tagihan: jumlah_tagihan?.toString() || "0",
+        jatuh_tempo: jatuh_tempo || "",
+        sekolah_id: req.sekolah_id,
+        timestamp: new Date().toISOString(),
+        ...data,
+      };
+
+      const result = await sendNotificationToMultiple(
+        tokens,
+        title,
+        body,
+        notificationData
+      );
+
+      // Simpan ke history
+      const notifId = crypto.randomUUID();
+      await connection.execute(
+        "INSERT INTO notifications (id, user_id, title, body, type, data) VALUES (?, ?, ?, ?, 'tagihan', ?)",
+        [notifId, waliUserId, title, body, JSON.stringify(notificationData)]
+      );
+
+      await connection.end();
+
+      res.json({
+        message: "Notifikasi tagihan berhasil dikirim",
+        sent_count: tokens.length,
+        result: result,
+      });
+    } catch (error) {
+      console.error("ERROR SEND TAGIHAN NOTIFICATION:", error.message);
+      res.status(500).json({ error: "Gagal mengirim notifikasi tagihan" });
+    }
+  }
+);
+
+// Endpoint untuk notifikasi absensi
+app.post(
+  "/api/notifications/absensi",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      const {
+        siswa_id,
+        status_absensi,
+        mata_pelajaran,
+        tanggal,
+        data = {},
+      } = req.body;
+
+      if (!siswa_id || !status_absensi) {
+        return res
+          .status(400)
+          .json({ error: "Siswa ID dan status absensi diperlukan" });
+      }
+
+      // Dapatkan user_id wali
+      const connection = await getConnection();
+      const [wali] = await connection.execute(
+        "SELECT u.id as user_id FROM users u WHERE u.siswa_id = ? AND u.role = 'wali'",
+        [siswa_id]
+      );
+
+      if (wali.length === 0) {
+        await connection.end();
+        return res.status(404).json({ error: "User wali tidak ditemukan" });
+      }
+
+      const waliUserId = wali[0].user_id;
+      const tokens = await getUserFCMTokens(waliUserId);
+
+      if (tokens.length === 0) {
+        await connection.end();
+        return res
+          .status(400)
+          .json({ error: "Tidak ada token aktif untuk wali" });
+      }
+
+      const title = "Notifikasi Absensi";
+      const body = `Anak Anda ${status_absensi} pada pelajaran ${
+        mata_pelajaran || ""
+      } tanggal ${tanggal || new Date().toLocaleDateString("id-ID")}`;
+
+      const notificationData = {
+        type: "absensi",
+        siswa_id: siswa_id,
+        status_absensi: status_absensi,
+        mata_pelajaran: mata_pelajaran || "",
+        tanggal: tanggal || new Date().toISOString().split("T")[0],
+        sekolah_id: req.sekolah_id,
+        timestamp: new Date().toISOString(),
+        ...data,
+      };
+
+      const result = await sendNotificationToMultiple(
+        tokens,
+        title,
+        body,
+        notificationData
+      );
+
+      // Simpan ke history
+      const notifId = crypto.randomUUID();
+      await connection.execute(
+        "INSERT INTO notifications (id, user_id, title, body, type, data) VALUES (?, ?, ?, ?, 'absensi', ?)",
+        [notifId, waliUserId, title, body, JSON.stringify(notificationData)]
+      );
+
+      await connection.end();
+
+      res.json({
+        message: "Notifikasi absensi berhasil dikirim",
+        sent_count: tokens.length,
+        result: result,
+      });
+    } catch (error) {
+      console.error("ERROR SEND ABSENSI NOTIFICATION:", error.message);
+      res.status(500).json({ error: "Gagal mengirim notifikasi absensi" });
+    }
+  }
+);
+
+// Endpoint untuk notifikasi aktivitas kelas
+app.post(
+  "/api/notifications/aktivitas-kelas",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      const { kelas_id, title, body, jenis_aktivitas, data = {} } = req.body;
+
+      if (!kelas_id || !title || !body) {
+        return res
+          .status(400)
+          .json({ error: "Kelas ID, title, dan body diperlukan" });
+      }
+
+      // Dapatkan semua siswa di kelas
+      const connection = await getConnection();
+      const [siswaList] = await connection.execute(
+        "SELECT id FROM siswa WHERE kelas_id = ?",
+        [kelas_id]
+      );
+
+      if (siswaList.length === 0) {
+        await connection.end();
+        return res.status(404).json({ error: "Tidak ada siswa di kelas ini" });
+      }
+
+      let tokens = [];
+
+      // Dapatkan tokens dari semua wali siswa
+      for (const siswa of siswaList) {
+        const [wali] = await connection.execute(
+          "SELECT u.id as user_id FROM users u WHERE u.siswa_id = ? AND u.role = 'wali'",
+          [siswa.id]
+        );
+
+        if (wali.length > 0) {
+          const userTokens = await getUserFCMTokens(wali[0].user_id);
+          tokens = tokens.concat(userTokens);
+        }
+      }
+
+      // Hapus duplikat
+      tokens = [...new Set(tokens)];
+
+      if (tokens.length === 0) {
+        await connection.end();
+        return res
+          .status(400)
+          .json({ error: "Tidak ada token aktif yang ditemukan" });
+      }
+
+      const notificationData = {
+        type: "aktivitas_kelas",
+        kelas_id: kelas_id,
+        jenis_aktivitas: jenis_aktivitas || "",
+        sekolah_id: req.sekolah_id,
+        timestamp: new Date().toISOString(),
+        ...data,
+      };
+
+      const result = await sendNotificationToMultiple(
+        tokens,
+        title,
+        body,
+        notificationData
+      );
+
+      // Simpan ke history untuk semua wali
+      for (const siswa of siswaList) {
+        const [wali] = await connection.execute(
+          "SELECT u.id as user_id FROM users u WHERE u.siswa_id = ? AND u.role = 'wali'",
+          [siswa.id]
+        );
+
+        if (wali.length > 0) {
+          const notifId = crypto.randomUUID();
+          await connection.execute(
+            "INSERT INTO notifications (id, user_id, title, body, type, data) VALUES (?, ?, ?, ?, 'aktivitas_kelas', ?)",
+            [
+              notifId,
+              wali[0].user_id,
+              title,
+              body,
+              JSON.stringify(notificationData),
+            ]
+          );
+        }
+      }
+
+      await connection.end();
+
+      res.json({
+        message: "Notifikasi aktivitas kelas berhasil dikirim",
+        sent_count: tokens.length,
+        result: result,
+      });
+    } catch (error) {
+      console.error("ERROR SEND AKTIVITAS KELAS NOTIFICATION:", error.message);
+      res
+        .status(500)
+        .json({ error: "Gagal mengirim notifikasi aktivitas kelas" });
+    }
+  }
+);
+
+// Endpoint untuk mendapatkan history notifications user
+app.get("/api/notifications", authenticateTokenAndSchool, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, unread_only = false } = req.query;
+    const offset = (page - 1) * limit;
+
+    const connection = await getConnection();
+
+    let query = "SELECT * FROM notifications WHERE user_id = ?";
+    let countQuery =
+      "SELECT COUNT(*) as total FROM notifications WHERE user_id = ?";
+    let params = [req.user.id];
+
+    if (unread_only === "true") {
+      query += " AND is_read = FALSE";
+      countQuery += " AND is_read = FALSE";
+    }
+
+    query += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+    params.push(parseInt(limit), offset);
+
+    const [notifications] = await connection.execute(query, params);
+    const [countResult] = await connection.execute(countQuery, [req.user.id]);
+
+    await connection.end();
+
+    res.json({
+      notifications,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: countResult[0].total,
+        total_pages: Math.ceil(countResult[0].total / limit),
+      },
+    });
+  } catch (error) {
+    console.error("ERROR GET NOTIFICATIONS:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data notifikasi" });
+  }
+});
+
+// Endpoint untuk menandai notifikasi sebagai sudah dibaca
+app.put(
+  "/api/notifications/:id/read",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const connection = await getConnection();
+      await connection.execute(
+        "UPDATE notifications SET is_read = TRUE WHERE id = ? AND user_id = ?",
+        [id, req.user.id]
+      );
+      await connection.end();
+
+      res.json({ message: "Notifikasi ditandai sebagai sudah dibaca" });
+    } catch (error) {
+      console.error("ERROR MARK NOTIFICATION READ:", error.message);
+      res.status(500).json({ error: "Gagal menandai notifikasi" });
+    }
+  }
+);
+
+// Endpoint untuk menandai semua notifikasi sebagai sudah dibaca
+app.put(
+  "/api/notifications/read-all",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      const connection = await getConnection();
+      await connection.execute(
+        "UPDATE notifications SET is_read = TRUE WHERE user_id = ? AND is_read = FALSE",
+        [req.user.id]
+      );
+      await connection.end();
+
+      res.json({ message: "Semua notifikasi ditandai sebagai sudah dibaca" });
+    } catch (error) {
+      console.error("ERROR MARK ALL NOTIFICATIONS READ:", error.message);
+      res.status(500).json({ error: "Gagal menandai notifikasi" });
+    }
+  }
+);
+
+// Endpoint untuk testing notifikasi
+app.post(
+  "/api/notifications/test",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      const {
+        title = "Test Notification",
+        body = "This is a test notification",
+      } = req.body;
+
+      // Kirim ke diri sendiri
+      const tokens = await getUserFCMTokens(req.user.id);
+
+      if (tokens.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "Tidak ada token aktif untuk user ini" });
+      }
+
+      const result = await sendNotificationToMultiple(tokens, title, body, {
+        type: "test",
+        sekolah_id: req.sekolah_id,
+        timestamp: new Date().toISOString(),
+      });
+
+      res.json({
+        message: "Notifikasi test berhasil dikirim",
+        tokens_sent: tokens.length,
+        result: result,
+      });
+    } catch (error) {
+      console.error("ERROR TEST NOTIFICATION:", error.message);
+      res.status(500).json({ error: "Gagal mengirim notifikasi test" });
+    }
+  }
+);
 
 // Get available roles untuk user di sekolah tertentu
 app.get("/api/user/roles", authenticateTokenAndSchool, async (req, res) => {
@@ -1179,12 +1856,12 @@ app.post("/api/kelas", authenticateTokenAndSchool, async (req, res) => {
   try {
     console.log("Menambah kelas baru:", req.body);
     const { nama, wali_kelas_id, grade_level } = req.body;
-    
+
     // Validasi field wajib
     if (!nama) {
       return res.status(400).json({ error: "Nama kelas harus diisi" });
     }
-    
+
     const id = crypto.randomUUID();
 
     // Konversi undefined ke null untuk MySQL
@@ -4807,6 +5484,7 @@ app.get("/api/debug/absensi-data", authenticateToken, async (req, res) => {
 
 // Perbaiki endpoint POST absensi dengan validasi lengkap
 app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
+  let connection;
   try {
     console.log("Menambah absensi:", req.body);
     const {
@@ -4845,8 +5523,7 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
       });
     }
 
-    const id = crypto.randomUUID();
-    const connection = await getConnection();
+    connection = await getConnection();
 
     // Cek apakah siswa termasuk dalam sekolah yang sama
     const [siswaCheck] = await connection.execute(
@@ -4893,25 +5570,28 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
       [siswa_id, mata_pelajaran_id, tanggal, guru_id]
     );
 
+    let absensiId;
+    let action;
+
     if (existing.length > 0) {
       // Update jika sudah ada
+      absensiId = existing[0].id;
+      action = "updated";
+      
       await connection.execute(
         "UPDATE absensi SET status = ?, keterangan = ?, kelas_id = ?, sekolah_id = ?, updated_at = NOW() WHERE id = ?",
-        [status, keterangan || "", kelas_id, req.sekolah_id, existing[0].id]
+        [status, keterangan || "", kelas_id, req.sekolah_id, absensiId]
       );
-      await connection.end();
-      console.log("Absensi berhasil diupdate:", existing[0].id);
-      return res.json({
-        message: "Absensi berhasil diupdate",
-        id: existing[0].id,
-        action: "updated",
-      });
+      console.log("Absensi berhasil diupdate:", absensiId);
     } else {
       // Insert baru
+      absensiId = crypto.randomUUID();
+      action = "created";
+      
       await connection.execute(
         "INSERT INTO absensi (id, siswa_id, guru_id, mata_pelajaran_id, kelas_id, sekolah_id, tanggal, status, keterangan) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
-          id,
+          absensiId,
           siswa_id,
           guru_id,
           mata_pelajaran_id,
@@ -4922,22 +5602,110 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
           keterangan || "",
         ]
       );
-      await connection.end();
-      console.log("Absensi berhasil ditambahkan:", id);
-      return res.json({
-        message: "Absensi berhasil ditambahkan",
-        id,
-        action: "created",
-      });
+      console.log("Absensi berhasil ditambahkan:", absensiId);
     }
+
+    // ========== KIRIM NOTIFIKASI ==========
+    try {
+      // Ambil data siswa dan mata pelajaran untuk notifikasi
+      const [siswaData] = await connection.execute(
+        "SELECT nama FROM siswa WHERE id = ?",
+        [siswa_id]
+      );
+
+      const [mapelData] = await connection.execute(
+        "SELECT nama FROM mata_pelajaran WHERE id = ?",
+        [mata_pelajaran_id]
+      );
+
+      if (siswaData.length > 0 && mapelData.length > 0) {
+        // Format tanggal untuk notifikasi
+        const formattedDate = new Date(tanggal).toLocaleDateString('id-ID', {
+          weekday: 'long',
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        });
+
+        // Buat body notifikasi berdasarkan status
+        let notificationTitle, notificationBody;
+        
+        switch(status) {
+          case 'hadir':
+            notificationTitle = '✅ Absensi Hadir';
+            notificationBody = `${siswaData[0].nama} hadir pada pelajaran ${mapelData[0].nama}`;
+            break;
+          case 'terlambat':
+            notificationTitle = '⚠️ Keterlambatan';
+            notificationBody = `${siswaData[0].nama} terlambat pada pelajaran ${mapelData[0].nama}`;
+            break;
+          case 'izin':
+            notificationTitle = '📝 Izin';
+            notificationBody = `${siswaData[0].nama} izin pada pelajaran ${mapelData[0].nama}`;
+            break;
+          case 'sakit':
+            notificationTitle = '🏥 Sakit';
+            notificationBody = `${siswaData[0].nama} sakit pada pelajaran ${mapelData[0].nama}`;
+            break;
+          case 'alpha':
+            notificationTitle = '❌ Alpha';
+            notificationBody = `${siswaData[0].nama} alpha pada pelajaran ${mapelData[0].nama}`;
+            break;
+          default:
+            notificationTitle = '📋 Absensi';
+            notificationBody = `Update absensi ${siswaData[0].nama} pada ${mapelData[0].nama}`;
+        }
+
+        // Tambahkan keterangan jika ada
+        if (keterangan) {
+          notificationBody += ` - ${keterangan}`;
+        }
+
+        // Panggil endpoint notifikasi absensi
+        const notificationBodyData = {
+          siswa_id: siswa_id,
+          status_absensi: status,
+          mata_pelajaran: mapelData[0].nama,
+          tanggal: tanggal,
+          data: {
+            absensi_id: absensiId,
+            action: action,
+            tanggal_formatted: formattedDate
+          }
+        };
+
+        console.log("Mengirim notifikasi absensi:", notificationBodyData);
+
+        // Kirim request notifikasi - gunakan internal function, tidak perlu HTTP request
+        await sendAbsensiNotification(notificationBodyData, req.headers['authorization']);
+
+      }
+    } catch (notifError) {
+      console.error("Error dalam pengiriman notifikasi:", notifError);
+      // Jangan gagalkan proses absensi hanya karena notifikasi error
+    }
+    // ========== END KIRIM NOTIFIKASI ==========
+
+    await connection.end();
+
+    return res.json({
+      message: `Absensi berhasil ${action === 'created' ? 'ditambahkan' : 'diupdate'}`,
+      id: absensiId,
+      action: action,
+    });
+
   } catch (error) {
+    // Pastikan koneksi ditutup jika ada error
+    if (connection) {
+      await connection.end();
+    }
+
     console.error("ERROR POST ABSENSI:", error.message);
     console.error("SQL Error code:", error.code);
 
     if (error.code === "ER_NO_SUCH_TABLE") {
       return res.status(500).json({
-        error:
-          "Tabel absensi tidak ditemukan. Silakan buat tabel terlebih dahulu.",
+        error: "Tabel absensi tidak ditemukan. Silakan buat tabel terlebih dahulu.",
       });
     }
 
@@ -4950,8 +5718,7 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
 
     if (error.code === "ER_DUP_ENTRY") {
       return res.status(400).json({
-        error:
-          "Absensi untuk siswa ini sudah ada pada tanggal dan mata pelajaran yang sama",
+        error: "Absensi untuk siswa ini sudah ada pada tanggal dan mata pelajaran yang sama",
       });
     }
 
@@ -4961,6 +5728,99 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
     });
   }
 });
+
+// Helper function untuk mengirim notifikasi absensi
+async function sendAbsensiNotification(notificationData, authHeader) {
+  try {
+    const { siswa_id, status_absensi, mata_pelajaran, tanggal, data } = notificationData;
+
+    // Dapatkan user_id wali dari siswa
+    const connection = await getConnection();
+    const [wali] = await connection.execute(
+      "SELECT u.id as user_id FROM users u WHERE u.siswa_id = ? AND u.role = 'wali'",
+      [siswa_id]
+    );
+
+    if (wali.length === 0) {
+      await connection.end();
+      console.log("User wali tidak ditemukan untuk siswa:", siswa_id);
+      return;
+    }
+
+    const waliUserId = wali[0].user_id;
+    const tokens = await getUserFCMTokens(waliUserId);
+
+    if (tokens.length === 0) {
+      await connection.end();
+      console.log("Tidak ada token aktif untuk wali:", waliUserId);
+      return;
+    }
+
+    // Buat title dan body notifikasi
+    const title = getAbsensiTitle(status_absensi);
+    const body = getAbsensiBody(status_absensi, mata_pelajaran, data?.tanggal_formatted);
+
+    const fcmData = {
+      type: 'absensi',
+      siswa_id: siswa_id,
+      status_absensi: status_absensi,
+      mata_pelajaran: mata_pelajaran,
+      tanggal: tanggal,
+      absensi_id: data?.absensi_id,
+      action: data?.action,
+      timestamp: new Date().toISOString(),
+      ...data
+    };
+
+    const result = await sendNotificationToMultiple(tokens, title, body, fcmData);
+
+    // Simpan ke history notifications
+    const notifId = crypto.randomUUID();
+    await connection.execute(
+      "INSERT INTO notifications (id, user_id, title, body, type, data) VALUES (?, ?, ?, ?, 'absensi', ?)",
+      [notifId, waliUserId, title, body, JSON.stringify(fcmData)]
+    );
+
+    await connection.end();
+
+    console.log("Notifikasi absensi berhasil dikirim ke wali:", waliUserId);
+    return result;
+
+  } catch (error) {
+    console.error("ERROR SEND ABSENSI NOTIFICATION:", error.message);
+  }
+}
+
+// Helper function untuk title notifikasi absensi
+function getAbsensiTitle(status) {
+  const titles = {
+    'hadir': '✅ Absensi Hadir',
+    'terlambat': '⚠️ Keterlambatan',
+    'izin': '📝 Izin',
+    'sakit': '🏥 Sakit',
+    'alpha': '❌ Alpha'
+  };
+  return titles[status] || '📋 Update Absensi';
+}
+
+// Helper function untuk body notifikasi absensi
+function getAbsensiBody(status, mataPelajaran, tanggalFormatted) {
+  const baseBodies = {
+    'hadir': `hadir pada pelajaran ${mataPelajaran}`,
+    'terlambat': `terlambat pada pelajaran ${mataPelajaran}`,
+    'izin': `izin pada pelajaran ${mataPelajaran}`,
+    'sakit': `sakit pada pelajaran ${mataPelajaran}`,
+    'alpha': `alpha pada pelajaran ${mataPelajaran}`
+  };
+  
+  const baseBody = baseBodies[status] || `ada update absensi pada ${mataPelajaran}`;
+  
+  if (tanggalFormatted) {
+    return `Anak Anda ${baseBody} - ${tanggalFormatted}`;
+  }
+  
+  return `Anak Anda ${baseBody}`;
+}
 
 // Kelola Nilai
 app.get("/api/nilai", authenticateTokenAndSchool, async (req, res) => {
@@ -5476,8 +6336,8 @@ app.get("/api/materi-progress", authenticateToken, async (req, res) => {
     console.log("Mengambil data progress materi");
 
     if (!guru_id || !mata_pelajaran_id) {
-      return res.status(400).json({ 
-        error: "Parameter guru_id dan mata_pelajaran_id diperlukan" 
+      return res.status(400).json({
+        error: "Parameter guru_id dan mata_pelajaran_id diperlukan",
       });
     }
 
@@ -5489,7 +6349,10 @@ app.get("/api/materi-progress", authenticateToken, async (req, res) => {
     );
     await connection.end();
 
-    console.log("Berhasil mengambil data progress materi, jumlah:", progress.length);
+    console.log(
+      "Berhasil mengambil data progress materi, jumlah:",
+      progress.length
+    );
     res.json(progress);
   } catch (error) {
     console.error("ERROR GET MATERI PROGRESS:", error.message);
@@ -5501,29 +6364,36 @@ app.get("/api/materi-progress", authenticateToken, async (req, res) => {
 app.post("/api/materi-progress", authenticateToken, async (req, res) => {
   try {
     console.log("Menyimpan progress materi:", req.body);
-    const { guru_id, mata_pelajaran_id, bab_id, sub_bab_id, is_checked } = req.body;
+    const { guru_id, mata_pelajaran_id, bab_id, sub_bab_id, is_checked } =
+      req.body;
 
     if (!guru_id || !mata_pelajaran_id) {
-      return res.status(400).json({ 
-        error: "Parameter guru_id dan mata_pelajaran_id diperlukan" 
+      return res.status(400).json({
+        error: "Parameter guru_id dan mata_pelajaran_id diperlukan",
       });
     }
 
     // At least bab_id must be provided
     if (!bab_id) {
-      return res.status(400).json({ 
-        error: "Parameter bab_id diperlukan" 
+      return res.status(400).json({
+        error: "Parameter bab_id diperlukan",
       });
     }
 
     const connection = await getConnection();
-    
+
     // Check if record already exists
     const [existing] = await connection.execute(
       `SELECT * FROM materi_progress 
        WHERE guru_id = ? AND mata_pelajaran_id = ? 
        AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
-      [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+      [
+        guru_id,
+        mata_pelajaran_id,
+        bab_id,
+        sub_bab_id || null,
+        sub_bab_id || null,
+      ]
     );
 
     if (existing.length > 0) {
@@ -5534,7 +6404,15 @@ app.post("/api/materi-progress", authenticateToken, async (req, res) => {
          SET is_checked = ?, is_generated = IF(? = FALSE, FALSE, is_generated), updated_at = CURRENT_TIMESTAMP 
          WHERE guru_id = ? AND mata_pelajaran_id = ? 
          AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
-        [is_checked, is_checked, guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+        [
+          is_checked,
+          is_checked,
+          guru_id,
+          mata_pelajaran_id,
+          bab_id,
+          sub_bab_id || null,
+          sub_bab_id || null,
+        ]
       );
       console.log("Progress materi berhasil diupdate");
     } else {
@@ -5547,11 +6425,11 @@ app.post("/api/materi-progress", authenticateToken, async (req, res) => {
       );
       console.log("Progress materi berhasil ditambahkan");
     }
-    
+
     await connection.end();
-    res.json({ 
+    res.json({
       message: "Progress materi berhasil disimpan",
-      is_checked: is_checked 
+      is_checked: is_checked,
     });
   } catch (error) {
     console.error("ERROR SAVE MATERI PROGRESS:", error.message);
@@ -5566,26 +6444,38 @@ app.post("/api/materi-progress/batch", authenticateToken, async (req, res) => {
     console.log("Menyimpan batch progress materi:", req.body);
     const { guru_id, mata_pelajaran_id, progress_items } = req.body;
 
-    if (!guru_id || !mata_pelajaran_id || !progress_items || !Array.isArray(progress_items)) {
-      return res.status(400).json({ 
-        error: "Parameter guru_id, mata_pelajaran_id, dan progress_items diperlukan" 
+    if (
+      !guru_id ||
+      !mata_pelajaran_id ||
+      !progress_items ||
+      !Array.isArray(progress_items)
+    ) {
+      return res.status(400).json({
+        error:
+          "Parameter guru_id, mata_pelajaran_id, dan progress_items diperlukan",
       });
     }
 
     const connection = await getConnection();
-    
+
     // Process each item
     for (const item of progress_items) {
       const { bab_id, sub_bab_id, is_checked } = item;
-      
+
       if (!bab_id) continue; // Skip invalid items
-      
+
       // Check if record exists
       const [existing] = await connection.execute(
         `SELECT * FROM materi_progress 
          WHERE guru_id = ? AND mata_pelajaran_id = ? 
          AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
-        [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+        [
+          guru_id,
+          mata_pelajaran_id,
+          bab_id,
+          sub_bab_id || null,
+          sub_bab_id || null,
+        ]
       );
 
       if (existing.length > 0) {
@@ -5596,7 +6486,15 @@ app.post("/api/materi-progress/batch", authenticateToken, async (req, res) => {
            SET is_checked = ?, is_generated = IF(? = FALSE, FALSE, is_generated), updated_at = CURRENT_TIMESTAMP 
            WHERE guru_id = ? AND mata_pelajaran_id = ? 
            AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
-          [is_checked, is_checked, guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+          [
+            is_checked,
+            is_checked,
+            guru_id,
+            mata_pelajaran_id,
+            bab_id,
+            sub_bab_id || null,
+            sub_bab_id || null,
+          ]
         );
       } else {
         // Insert
@@ -5608,12 +6506,14 @@ app.post("/api/materi-progress/batch", authenticateToken, async (req, res) => {
         );
       }
     }
-    
+
     await connection.end();
-    console.log(`Batch progress materi berhasil disimpan, jumlah: ${progress_items.length}`);
-    res.json({ 
+    console.log(
+      `Batch progress materi berhasil disimpan, jumlah: ${progress_items.length}`
+    );
+    res.json({
       message: "Batch progress materi berhasil disimpan",
-      count: progress_items.length 
+      count: progress_items.length,
     });
   } catch (error) {
     console.error("ERROR BATCH SAVE MATERI PROGRESS:", error.message);
@@ -5622,87 +6522,113 @@ app.post("/api/materi-progress/batch", authenticateToken, async (req, res) => {
 });
 
 // Mark materi as generated (when used for RPP/activity generation)
-app.post("/api/materi-progress/mark-generated", authenticateToken, async (req, res) => {
-  try {
-    console.log("Menandai materi sebagai sudah di-generate:", req.body);
-    const { guru_id, mata_pelajaran_id, items } = req.body;
+app.post(
+  "/api/materi-progress/mark-generated",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      console.log("Menandai materi sebagai sudah di-generate:", req.body);
+      const { guru_id, mata_pelajaran_id, items } = req.body;
 
-    if (!guru_id || !mata_pelajaran_id || !items || !Array.isArray(items)) {
-      return res.status(400).json({ 
-        error: "Parameter guru_id, mata_pelajaran_id, dan items diperlukan" 
-      });
-    }
+      if (!guru_id || !mata_pelajaran_id || !items || !Array.isArray(items)) {
+        return res.status(400).json({
+          error: "Parameter guru_id, mata_pelajaran_id, dan items diperlukan",
+        });
+      }
 
-    const connection = await getConnection();
-    
-    // Mark each item as generated
-    for (const item of items) {
-      const { bab_id, sub_bab_id } = item;
-      
-      if (!bab_id) continue;
-      
-      // Update the is_generated flag
-      await connection.execute(
-        `UPDATE materi_progress 
+      const connection = await getConnection();
+
+      // Mark each item as generated
+      for (const item of items) {
+        const { bab_id, sub_bab_id } = item;
+
+        if (!bab_id) continue;
+
+        // Update the is_generated flag
+        await connection.execute(
+          `UPDATE materi_progress 
          SET is_generated = TRUE, updated_at = CURRENT_TIMESTAMP 
          WHERE guru_id = ? AND mata_pelajaran_id = ? 
          AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
-        [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+          [
+            guru_id,
+            mata_pelajaran_id,
+            bab_id,
+            sub_bab_id || null,
+            sub_bab_id || null,
+          ]
+        );
+      }
+
+      await connection.end();
+      console.log(
+        `Materi berhasil ditandai sebagai generated, jumlah: ${items.length}`
       );
+      res.json({
+        message: "Materi berhasil ditandai sebagai sudah di-generate",
+        count: items.length,
+      });
+    } catch (error) {
+      console.error("ERROR MARK GENERATED:", error.message);
+      res
+        .status(500)
+        .json({ error: "Gagal menandai materi sebagai generated" });
     }
-    
-    await connection.end();
-    console.log(`Materi berhasil ditandai sebagai generated, jumlah: ${items.length}`);
-    res.json({ 
-      message: "Materi berhasil ditandai sebagai sudah di-generate",
-      count: items.length 
-    });
-  } catch (error) {
-    console.error("ERROR MARK GENERATED:", error.message);
-    res.status(500).json({ error: "Gagal menandai materi sebagai generated" });
   }
-});
+);
 
 // Reset generated status (to allow regeneration)
-app.post("/api/materi-progress/reset-generated", authenticateToken, async (req, res) => {
-  try {
-    console.log("Reset status generated materi:", req.body);
-    const { guru_id, mata_pelajaran_id, items } = req.body;
+app.post(
+  "/api/materi-progress/reset-generated",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      console.log("Reset status generated materi:", req.body);
+      const { guru_id, mata_pelajaran_id, items } = req.body;
 
-    if (!guru_id || !mata_pelajaran_id || !items || !Array.isArray(items)) {
-      return res.status(400).json({ 
-        error: "Parameter guru_id, mata_pelajaran_id, dan items diperlukan" 
-      });
-    }
+      if (!guru_id || !mata_pelajaran_id || !items || !Array.isArray(items)) {
+        return res.status(400).json({
+          error: "Parameter guru_id, mata_pelajaran_id, dan items diperlukan",
+        });
+      }
 
-    const connection = await getConnection();
-    
-    // Reset is_generated flag for each item
-    for (const item of items) {
-      const { bab_id, sub_bab_id } = item;
-      
-      if (!bab_id) continue;
-      
-      await connection.execute(
-        `UPDATE materi_progress 
+      const connection = await getConnection();
+
+      // Reset is_generated flag for each item
+      for (const item of items) {
+        const { bab_id, sub_bab_id } = item;
+
+        if (!bab_id) continue;
+
+        await connection.execute(
+          `UPDATE materi_progress 
          SET is_generated = FALSE, updated_at = CURRENT_TIMESTAMP 
          WHERE guru_id = ? AND mata_pelajaran_id = ? 
          AND bab_id = ? AND (sub_bab_id = ? OR (sub_bab_id IS NULL AND ? IS NULL))`,
-        [guru_id, mata_pelajaran_id, bab_id, sub_bab_id || null, sub_bab_id || null]
+          [
+            guru_id,
+            mata_pelajaran_id,
+            bab_id,
+            sub_bab_id || null,
+            sub_bab_id || null,
+          ]
+        );
+      }
+
+      await connection.end();
+      console.log(
+        `Status generated berhasil di-reset, jumlah: ${items.length}`
       );
+      res.json({
+        message: "Status generated berhasil di-reset",
+        count: items.length,
+      });
+    } catch (error) {
+      console.error("ERROR RESET GENERATED:", error.message);
+      res.status(500).json({ error: "Gagal reset status generated" });
     }
-    
-    await connection.end();
-    console.log(`Status generated berhasil di-reset, jumlah: ${items.length}`);
-    res.json({ 
-      message: "Status generated berhasil di-reset",
-      count: items.length 
-    });
-  } catch (error) {
-    console.error("ERROR RESET GENERATED:", error.message);
-    res.status(500).json({ error: "Gagal reset status generated" });
   }
-});
+);
 
 // ==================== END MATERI PROGRESS ENDPOINTS ====================
 
@@ -9194,10 +10120,12 @@ app.get("/api/kegiatan/:id", authenticateTokenAndSchool, async (req, res) => {
 // Get Pengumuman dengan filter berdasarkan role
 app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
   try {
-    console.log(`Mengambil data pengumuman untuk sekolah: ${req.sekolah_id} user role: ${req.user.role}`);
-    
+    console.log(
+      `Mengambil data pengumuman untuk sekolah: ${req.sekolah_id} user role: ${req.user.role}`
+    );
+
     const connection = await getConnection();
-    
+
     let query = `
       SELECT p.*, 
         u.nama as pembuat_nama,
@@ -9209,13 +10137,13 @@ app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
     let params = [req.sekolah_id];
 
     // Filter berdasarkan role user
-    if (req.user.role === 'wali') {
+    if (req.user.role === "wali") {
       // Untuk wali, hanya tampilkan pengumuman yang ditujukan untuk wali atau semua
       query += ` AND (p.role_target LIKE 'wali' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')`;
-    } else if (req.user.role === 'guru') {
+    } else if (req.user.role === "guru") {
       // Untuk guru, tampilkan pengumuman untuk guru atau semua
       query += ` AND (p.role_target LIKE 'guru' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')`;
-    } else if (req.user.role === 'siswa') {
+    } else if (req.user.role === "siswa") {
       // Untuk siswa, tampilkan pengumuman untuk siswa atau semua
       query += ` AND (p.role_target LIKE 'siswa' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')`;
     }
@@ -9227,7 +10155,10 @@ app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
     const [pengumuman] = await connection.execute(query, params);
     await connection.end();
 
-    console.log("Berhasil mengambil data pengumuman, jumlah:", pengumuman.length);
+    console.log(
+      "Berhasil mengambil data pengumuman, jumlah:",
+      pengumuman.length
+    );
     res.json(pengumuman);
   } catch (error) {
     console.error("ERROR GET PENGUMUMAN:", error.message);
@@ -11057,7 +11988,7 @@ app.use((error, req, res, next) => {
 // }
 
 // buatHash("password123");
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server berjalan di port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`);

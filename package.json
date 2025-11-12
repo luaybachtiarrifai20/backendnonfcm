@@ -1,11 +1,11 @@
 {
   "name": "backend_manajemensekolah",
   "version": "1.0.0",
-  "main": "app.js",
+  "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node app.js",
-    "dev": "nodemon app.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "keywords": [],
   "author": "",
@@ -17,6 +17,7 @@
     "crypto": "^1.0.1",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "firebase-admin": "^13.6.0",
     "fs": "^0.0.1-security",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
