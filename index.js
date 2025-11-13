@@ -96,20 +96,52 @@ const sendNotification = async (token, title, body, data = {}) => {
 // Helper function untuk mengirim notifikasi ke multiple devices
 const sendNotificationToMultiple = async (tokens, title, body, data = {}) => {
   try {
+    // Convert all data values to strings for FCM
+    const fcmData = {};
+    Object.keys(data).forEach(key => {
+      fcmData[key] = String(data[key]);
+    });
+
     const message = {
       tokens: tokens,
       notification: {
         title: title,
         body: body,
       },
-      data: data,
+      data: fcmData,
     };
 
     const response = await admin.messaging().sendEachForMulticast(message);
-    console.log("Notifikasi multicast berhasil dikirim:", response);
-    return { success: true, response };
+    
+    // Log detailed results
+    console.log(`📊 FCM Multicast Result: Success=${response.successCount}, Failed=${response.failureCount}`);
+    
+    // Log errors if any
+    if (response.failureCount > 0) {
+      response.responses.forEach((resp, idx) => {
+        if (!resp.success) {
+          const error = resp.error;
+          console.error(`❌ Token ${idx + 1}/${tokens.length} failed:`);
+          console.error(`   Error Code: ${error.code}`);
+          console.error(`   Error Message: ${error.message}`);
+          
+          // Specific handling for common errors
+          if (error.code === 'messaging/invalid-registration-token' || 
+              error.code === 'messaging/registration-token-not-registered') {
+            console.error(`   ⚠️  Token sudah tidak valid, harus dihapus dari database`);
+            console.error(`   Token: ${tokens[idx].substring(0, 20)}...`);
+          } else if (error.code === 'messaging/mismatched-credential') {
+            console.error(`   ⚠️  SenderId mismatch - Token dari Firebase project berbeda`);
+            console.error(`   Token: ${tokens[idx].substring(0, 20)}...`);
+          }
+        }
+      });
+    }
+    
+    return { success: response.successCount > 0, response };
   } catch (error) {
-    console.error("Error mengirim notifikasi multicast:", error);
+    console.error("❌ Error mengirim notifikasi multicast:", error.message);
+    console.error("Stack:", error.stack);
     return { success: false, error: error.message };
   }
 };
@@ -5822,6 +5854,150 @@ function getAbsensiBody(status, mataPelajaran, tanggalFormatted) {
   return `Anak Anda ${baseBody}`;
 }
 
+// Helper function untuk mengirim notifikasi aktivitas kelas
+async function sendClassActivityNotification(activityData, authHeader) {
+  try {
+    const { 
+      kegiatan_id, 
+      kelas_id, 
+      judul, 
+      deskripsi,
+      jenis,
+      target,
+      mata_pelajaran,
+      guru_nama,
+      tanggal,
+      siswa_target 
+    } = activityData;
+
+    const connection = await getConnection();
+
+    // Dapatkan daftar siswa berdasarkan target
+    let siswaList = [];
+    
+    if (target === 'khusus' && siswa_target && siswa_target.length > 0) {
+      // Untuk target khusus, ambil siswa yang ditarget
+      const placeholders = siswa_target.map(() => '?').join(',');
+      const [siswa] = await connection.execute(
+        `SELECT id, nama FROM siswa WHERE id IN (${placeholders})`,
+        siswa_target
+      );
+      siswaList = siswa;
+    } else {
+      // Untuk target umum, ambil semua siswa di kelas tersebut
+      const [siswa] = await connection.execute(
+        "SELECT id, nama FROM siswa WHERE kelas_id = ?",
+        [kelas_id]
+      );
+      siswaList = siswa;
+    }
+
+    if (siswaList.length === 0) {
+      await connection.end();
+      console.log("Tidak ada siswa ditemukan untuk kelas:", kelas_id);
+      return;
+    }
+
+    // Loop untuk setiap siswa dan kirim notifikasi ke wali masing-masing
+    for (const siswa of siswaList) {
+      try {
+        // Dapatkan user_id wali dari siswa
+        const [wali] = await connection.execute(
+          "SELECT u.id as user_id, u.nama as wali_nama FROM users u WHERE u.siswa_id = ? AND u.role = 'wali'",
+          [siswa.id]
+        );
+
+        if (wali.length === 0) {
+          console.log(`User wali tidak ditemukan untuk siswa: ${siswa.nama}`);
+          continue;
+        }
+
+        const waliUserId = wali[0].user_id;
+        const tokens = await getUserFCMTokens(waliUserId);
+
+        if (tokens.length === 0) {
+          console.log(`Tidak ada token aktif untuk wali: ${wali[0].wali_nama}`);
+          continue;
+        }
+
+        // Buat title dan body notifikasi
+        const title = getActivityTitle(jenis);
+        const body = getActivityBody(jenis, judul, mata_pelajaran, siswa.nama);
+
+        const fcmData = {
+          type: 'class_activity',
+          kegiatan_id: kegiatan_id,
+          siswa_id: siswa.id,
+          siswa_nama: siswa.nama,
+          kelas_id: kelas_id,
+          judul: judul,
+          deskripsi: deskripsi,
+          jenis: jenis,
+          target: target,
+          mata_pelajaran: mata_pelajaran,
+          guru_nama: guru_nama,
+          tanggal: tanggal,
+          timestamp: new Date().toISOString()
+        };
+
+        const result = await sendNotificationToMultiple(tokens, title, body, fcmData);
+
+        // Simpan ke history notifications
+        try {
+          const notifId = crypto.randomUUID();
+          await connection.execute(
+            "INSERT INTO notifications (id, user_id, title, body, type, data) VALUES (?, ?, ?, ?, ?, ?)",
+            [notifId, waliUserId, title, body, 'class_activity', JSON.stringify(fcmData)]
+          );
+          console.log(`✅ Notifikasi tersimpan ke database untuk wali: ${wali[0].wali_nama}`);
+        } catch (dbError) {
+          console.error(`❌ Error menyimpan notifikasi ke database untuk siswa ${siswa.nama}:`, dbError.message);
+          console.error(`SQL Error Code: ${dbError.code}, SQL State: ${dbError.sqlState}`);
+          // Lanjutkan meskipun gagal simpan ke database
+        }
+
+        console.log(`✅ Notifikasi aktivitas kelas berhasil dikirim ke wali: ${wali[0].wali_nama} untuk siswa: ${siswa.nama}`);
+      } catch (error) {
+        console.error(`❌ Error mengirim notifikasi untuk siswa ${siswa.nama}:`, error.message);
+        console.error(`Error Stack:`, error.stack);
+        // Lanjutkan ke siswa berikutnya
+        continue;
+      }
+    }
+
+    await connection.end();
+    return { success: true, sent_count: siswaList.length };
+
+  } catch (error) {
+    console.error("ERROR SEND CLASS ACTIVITY NOTIFICATION:", error.message);
+  }
+}
+
+// Helper function untuk title notifikasi aktivitas
+function getActivityTitle(jenis) {
+  const titles = {
+    'tugas': '📝 Tugas Baru',
+    'pr': '📚 PR Baru',
+    'ujian': '📋 Ujian',
+    'materi': '📖 Materi Baru',
+    'pengumuman': '📢 Pengumuman',
+    'kegiatan': '🎯 Kegiatan Baru'
+  };
+  return titles[jenis] || '📌 Aktivitas Kelas';
+}
+
+// Helper function untuk body notifikasi aktivitas
+function getActivityBody(jenis, judul, mataPelajaran, siswaNama) {
+  const jenisText = jenis === 'tugas' ? 'tugas' :
+                    jenis === 'pr' ? 'PR' :
+                    jenis === 'ujian' ? 'ujian' :
+                    jenis === 'materi' ? 'materi' :
+                    jenis === 'pengumuman' ? 'pengumuman' :
+                    'aktivitas';
+  
+  return `${siswaNama} mendapat ${jenisText} "${judul}" untuk mata pelajaran ${mataPelajaran}`;
+}
+
 // Kelola Nilai
 app.get("/api/nilai", authenticateTokenAndSchool, async (req, res) => {
   try {
@@ -10701,6 +10877,7 @@ app.post("/api/kegiatan", authenticateTokenAndSchool, async (req, res) => {
       await connection.commit();
 
       console.log("Kegiatan berhasil ditambahkan:", id);
+
       res.status(201).json({
         message: "Kegiatan berhasil ditambahkan",
         id,
@@ -10713,6 +10890,58 @@ app.post("/api/kegiatan", authenticateTokenAndSchool, async (req, res) => {
     } finally {
       await connection.end();
     }
+
+    // ========== KIRIM NOTIFIKASI KE WALI (SETELAH CONNECTION CLOSED) ==========
+    // Jalankan async setelah response dikirim, agar tidak mengganggu user experience
+    setImmediate(async () => {
+      try {
+        // Buat connection baru untuk notifikasi
+        const notifConnection = await getConnection();
+        
+        // Dapatkan info tambahan untuk notifikasi
+        const [kegiatanInfo] = await notifConnection.execute(
+          `SELECT 
+            kk.id, kk.judul, kk.deskripsi, kk.jenis, kk.target, kk.tanggal,
+            kk.kelas_id, mp.nama as mata_pelajaran, u.nama as guru_nama
+          FROM kegiatan_kelas kk
+          JOIN mata_pelajaran mp ON kk.mata_pelajaran_id = mp.id
+          JOIN users u ON kk.guru_id = u.id
+          WHERE kk.id = ?`,
+          [id]
+        );
+
+        await notifConnection.end();
+
+        if (kegiatanInfo.length > 0) {
+          const notificationData = {
+            kegiatan_id: id,
+            kelas_id: kegiatanInfo[0].kelas_id,
+            judul: kegiatanInfo[0].judul,
+            deskripsi: kegiatanInfo[0].deskripsi,
+            jenis: kegiatanInfo[0].jenis,
+            target: kegiatanInfo[0].target,
+            mata_pelajaran: kegiatanInfo[0].mata_pelajaran,
+            guru_nama: kegiatanInfo[0].guru_nama,
+            tanggal: kegiatanInfo[0].tanggal,
+            siswa_target: siswa_target || []
+          };
+
+          console.log("🔔 Mengirim notifikasi aktivitas kelas:", notificationData);
+          
+          // Kirim notifikasi ke wali
+          const result = await sendClassActivityNotification(notificationData, req.headers['authorization']);
+          
+          if (result && result.success) {
+            console.log(`✅ Notifikasi berhasil dikirim ke ${result.sent_count} wali murid`);
+          }
+        }
+      } catch (notifError) {
+        console.error("❌ Error dalam pengiriman notifikasi aktivitas:", notifError.message);
+        console.error("Stack:", notifError.stack);
+        // Jangan gagalkan proses pembuatan kegiatan hanya karena notifikasi error
+      }
+    });
+    // ========== END KIRIM NOTIFIKASI ==========
   } catch (error) {
     console.error("ERROR CREATE KEGIATAN:", error.message);
     console.error("SQL Error code:", error.code);
