@@ -5998,6 +5998,202 @@ function getActivityBody(jenis, judul, mataPelajaran, siswaNama) {
   return `${siswaNama} mendapat ${jenisText} "${judul}" untuk mata pelajaran ${mataPelajaran}`;
 }
 
+// Helper function untuk mengirim notifikasi pengumuman
+async function sendPengumumanNotification(pengumumanData, authHeader) {
+  try {
+    const { 
+      pengumuman_id, 
+      judul, 
+      konten,
+      kelas_id,
+      kelas_nama,
+      role_target,
+      prioritas,
+      pembuat_nama,
+      sekolah_id
+    } = pengumumanData;
+
+    const connection = await getConnection();
+
+    // Tentukan target users berdasarkan role_target dan kelas_id
+    let targetUsers = [];
+    
+    if (role_target === 'wali' || role_target === 'all') {
+      // Ambil wali murid
+      let waliQuery = `
+        SELECT DISTINCT u.id as user_id, u.nama as user_nama, u.role
+        FROM users u
+        WHERE u.role = 'wali' AND u.sekolah_id = ?
+      `;
+      let waliParams = [sekolah_id];
+
+      // Jika ada kelas spesifik, filter wali yang anaknya di kelas tersebut
+      if (kelas_id) {
+        waliQuery = `
+          SELECT DISTINCT u.id as user_id, u.nama as user_nama, u.role
+          FROM users u
+          JOIN siswa s ON u.siswa_id = s.id
+          WHERE u.role = 'wali' 
+            AND s.kelas_id = ? 
+            AND u.sekolah_id = ?
+        `;
+        waliParams = [kelas_id, sekolah_id];
+      }
+
+      const [waliList] = await connection.execute(waliQuery, waliParams);
+      targetUsers.push(...waliList);
+    }
+
+    if (role_target === 'guru' || role_target === 'all') {
+      // Ambil guru
+      let guruQuery = `
+        SELECT DISTINCT u.id as user_id, u.nama as user_nama, u.role
+        FROM users u
+        WHERE u.role = 'guru' AND u.sekolah_id = ?
+      `;
+      let guruParams = [sekolah_id];
+
+      // Jika ada kelas spesifik, filter guru yang mengajar di kelas tersebut
+      if (kelas_id) {
+        guruQuery = `
+          SELECT DISTINCT u.id as user_id, u.nama as user_nama, u.role
+          FROM users u
+          JOIN jadwal j ON u.id = j.guru_id
+          WHERE u.role = 'guru' 
+            AND j.kelas_id = ? 
+            AND u.sekolah_id = ?
+        `;
+        guruParams = [kelas_id, sekolah_id];
+      }
+
+      const [guruList] = await connection.execute(guruQuery, guruParams);
+      targetUsers.push(...guruList);
+    }
+
+    if (role_target === 'siswa' || role_target === 'all') {
+      // Ambil siswa (yang punya user account)
+      let siswaQuery = `
+        SELECT DISTINCT u.id as user_id, u.nama as user_nama, u.role
+        FROM users u
+        WHERE u.role = 'siswa' AND u.sekolah_id = ?
+      `;
+      let siswaParams = [sekolah_id];
+
+      if (kelas_id) {
+        siswaQuery = `
+          SELECT DISTINCT u.id as user_id, u.nama as user_nama, u.role
+          FROM users u
+          JOIN siswa s ON u.siswa_id = s.id
+          WHERE u.role = 'siswa' 
+            AND s.kelas_id = ? 
+            AND u.sekolah_id = ?
+        `;
+        siswaParams = [kelas_id, sekolah_id];
+      }
+
+      const [siswaList] = await connection.execute(siswaQuery, siswaParams);
+      targetUsers.push(...siswaList);
+    }
+
+    if (targetUsers.length === 0) {
+      await connection.end();
+      console.log(`Tidak ada target user untuk pengumuman: ${judul}`);
+      return { success: false, sent_count: 0 };
+    }
+
+    console.log(`📢 Target pengumuman: ${targetUsers.length} users (${role_target})`);
+
+    let successCount = 0;
+    let failCount = 0;
+
+    // Loop untuk setiap target user
+    for (const user of targetUsers) {
+      try {
+        // Dapatkan FCM tokens user
+        const tokens = await getUserFCMTokens(user.user_id);
+
+        if (tokens.length === 0) {
+          console.log(`⚠️  Tidak ada token aktif untuk ${user.role}: ${user.user_nama}`);
+          continue;
+        }
+
+        // Buat title dan body notifikasi
+        const title = getPengumumanTitle(prioritas);
+        const body = getPengumumanBody(judul, kelas_nama);
+
+        const fcmData = {
+          type: 'pengumuman',
+          pengumuman_id: pengumuman_id,
+          judul: judul,
+          konten: konten.substring(0, 200), // Truncate konten panjang
+          kelas_id: kelas_id || '',
+          kelas_nama: kelas_nama || '',
+          role_target: role_target,
+          prioritas: prioritas,
+          pembuat_nama: pembuat_nama,
+          timestamp: new Date().toISOString()
+        };
+
+        const result = await sendNotificationToMultiple(tokens, title, body, fcmData);
+
+        // Simpan ke history notifications
+        if (result.success) {
+          try {
+            const notifId = crypto.randomUUID();
+            await connection.execute(
+              "INSERT INTO notifications (id, user_id, title, body, type, data) VALUES (?, ?, ?, ?, ?, ?)",
+              [notifId, user.user_id, title, body, 'pengumuman', JSON.stringify(fcmData)]
+            );
+            successCount++;
+            console.log(`✅ Pengumuman terkirim ke ${user.role}: ${user.user_nama}`);
+          } catch (dbError) {
+            console.error(`❌ Error menyimpan notifikasi untuk ${user.user_nama}:`, dbError.message);
+          }
+        } else {
+          failCount++;
+        }
+      } catch (error) {
+        console.error(`❌ Error mengirim pengumuman ke ${user.user_nama}:`, error.message);
+        failCount++;
+        continue;
+      }
+    }
+
+    await connection.end();
+    console.log(`📊 Pengumuman: ${successCount} berhasil, ${failCount} gagal dari ${targetUsers.length} target`);
+    
+    return { 
+      success: successCount > 0, 
+      sent_count: successCount,
+      failed_count: failCount,
+      total_targets: targetUsers.length
+    };
+
+  } catch (error) {
+    console.error("ERROR SEND PENGUMUMAN NOTIFICATION:", error.message);
+    console.error("Stack:", error.stack);
+    return { success: false, sent_count: 0 };
+  }
+}
+
+// Helper function untuk title notifikasi pengumuman
+function getPengumumanTitle(prioritas) {
+  const titles = {
+    'urgent': '🚨 PENGUMUMAN PENTING',
+    'penting': '⚠️ Pengumuman Penting',
+    'biasa': '📢 Pengumuman'
+  };
+  return titles[prioritas] || '📢 Pengumuman';
+}
+
+// Helper function untuk body notifikasi pengumuman
+function getPengumumanBody(judul, kelasNama) {
+  if (kelasNama) {
+    return `${judul} - Kelas ${kelasNama}`;
+  }
+  return judul;
+}
+
 // Kelola Nilai
 app.get("/api/nilai", authenticateTokenAndSchool, async (req, res) => {
   try {
@@ -10439,13 +10635,68 @@ app.post("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
       ]
     );
 
-    await connection.end();
-
     console.log("Pengumuman berhasil ditambahkan:", id);
+
     res.json({
       message: "Pengumuman berhasil ditambahkan",
       id,
     });
+
+    await connection.end();
+
+    // ========== KIRIM NOTIFIKASI PENGUMUMAN ==========
+    // Jalankan async setelah response dikirim
+    setImmediate(async () => {
+      try {
+        // Buat connection baru untuk notifikasi
+        const notifConnection = await getConnection();
+        
+        // Dapatkan info lengkap pengumuman untuk notifikasi
+        const [pengumumanInfo] = await notifConnection.execute(
+          `SELECT 
+            p.id, p.judul, p.konten, p.kelas_id, p.role_target, p.prioritas,
+            k.nama as kelas_nama,
+            u.nama as pembuat_nama
+          FROM pengumuman p
+          LEFT JOIN kelas k ON p.kelas_id = k.id
+          JOIN users u ON p.pembuat_id = u.id
+          WHERE p.id = ?`,
+          [id]
+        );
+
+        await notifConnection.end();
+
+        if (pengumumanInfo.length > 0) {
+          const notificationData = {
+            pengumuman_id: id,
+            judul: pengumumanInfo[0].judul,
+            konten: pengumumanInfo[0].konten,
+            kelas_id: pengumumanInfo[0].kelas_id,
+            kelas_nama: pengumumanInfo[0].kelas_nama,
+            role_target: pengumumanInfo[0].role_target,
+            prioritas: pengumumanInfo[0].prioritas,
+            pembuat_nama: pengumumanInfo[0].pembuat_nama,
+            sekolah_id: req.sekolah_id
+          };
+
+          console.log("📢 Mengirim notifikasi pengumuman:", notificationData);
+          
+          // Kirim notifikasi
+          const result = await sendPengumumanNotification(notificationData, req.headers['authorization']);
+          
+          if (result && result.success) {
+            console.log(`✅ Pengumuman berhasil dikirim ke ${result.sent_count} dari ${result.total_targets} target users`);
+          } else {
+            console.log(`⚠️  Pengumuman gagal dikirim atau tidak ada target`);
+          }
+        }
+      } catch (notifError) {
+        console.error("❌ Error dalam pengiriman notifikasi pengumuman:", notifError.message);
+        console.error("Stack:", notifError.stack);
+        // Jangan gagalkan proses pembuatan pengumuman
+      }
+    });
+    // ========== END KIRIM NOTIFIKASI ==========
   } catch (error) {
     console.error("ERROR POST PENGUMUMAN:", error.message);
     console.error("SQL Error code:", error.code);
