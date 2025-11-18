@@ -682,25 +682,44 @@ app.post("/api/fcm/token", authenticateTokenAndSchool, async (req, res) => {
 
     const connection = await getConnection();
 
-    // Cek apakah token sudah ada
+    // Cek apakah token sudah ada untuk user ini
     const [existing] = await connection.execute(
       "SELECT id FROM fcm_tokens WHERE user_id = ? AND token = ?",
       [req.user.id, token]
     );
 
     if (existing.length > 0) {
-      // Update jika sudah ada
+      // Token sudah ada, hanya update timestamp dan pastikan aktif
       await connection.execute(
         "UPDATE fcm_tokens SET is_active = TRUE, device_type = ?, updated_at = NOW() WHERE user_id = ? AND token = ?",
         [device_type, req.user.id, token]
       );
+      console.log(`✅ FCM token diperbarui untuk user: ${req.user.nama || req.user.email}`);
     } else {
-      // Insert baru
+      // Token baru untuk user ini
+      
+      // PENTING: Hapus token lama untuk device_type yang sama
+      // Ini memastikan 1 user hanya punya 1 token per device_type
+      const [oldTokens] = await connection.execute(
+        "SELECT id, token FROM fcm_tokens WHERE user_id = ? AND device_type = ?",
+        [req.user.id, device_type]
+      );
+      
+      if (oldTokens.length > 0) {
+        console.log(`🗑️  Menghapus ${oldTokens.length} token lama untuk user: ${req.user.nama || req.user.email}`);
+        await connection.execute(
+          "DELETE FROM fcm_tokens WHERE user_id = ? AND device_type = ?",
+          [req.user.id, device_type]
+        );
+      }
+      
+      // Insert token baru
       const id = crypto.randomUUID();
       await connection.execute(
         "INSERT INTO fcm_tokens (id, user_id, token, device_type) VALUES (?, ?, ?, ?)",
         [id, req.user.id, token, device_type]
       );
+      console.log(`✅ FCM token baru disimpan untuk user: ${req.user.nama || req.user.email} (${device_type})`);
     }
 
     await connection.end();
@@ -6040,7 +6059,12 @@ async function sendPengumumanNotification(pengumumanData, authHeader) {
         waliParams = [kelas_id, sekolah_id];
       }
 
+      console.log(`🔍 Query wali - sekolah_id: ${sekolah_id}, kelas_id: ${kelas_id || 'semua'}`);
       const [waliList] = await connection.execute(waliQuery, waliParams);
+      console.log(`📊 Ditemukan ${waliList.length} wali murid`);
+      if (waliList.length > 0) {
+        console.log(`   Contoh wali: ${waliList[0].user_nama}`);
+      }
       targetUsers.push(...waliList);
     }
 
@@ -6071,28 +6095,46 @@ async function sendPengumumanNotification(pengumumanData, authHeader) {
     }
 
     if (role_target === 'siswa' || role_target === 'all') {
-      // Ambil siswa (yang punya user account)
-      let siswaQuery = `
-        SELECT DISTINCT u.id as user_id, u.nama as user_nama, u.role
+      // PENTING: Sistem ini tidak punya user siswa terpisah.
+      // Ketika target adalah 'siswa', kirim notifikasi ke WALI yang memiliki siswa tersebut
+      
+      console.log(`🔍 Query siswa - sekolah_id: ${sekolah_id}, kelas_id: ${kelas_id || 'semua'}`);
+      console.log(`ℹ️  Catatan: Notifikasi untuk siswa akan dikirim ke wali murid`);
+      
+      // Cari wali yang memiliki siswa (siswa_id terisi)
+      let siswaWaliQuery = `
+        SELECT DISTINCT u.id as user_id, u.nama as user_nama, u.role, s.nama as nama_siswa
         FROM users u
-        WHERE u.role = 'siswa' AND u.sekolah_id = ?
+        JOIN siswa s ON u.siswa_id = s.id
+        WHERE u.role = 'wali' AND u.sekolah_id = ?
       `;
-      let siswaParams = [sekolah_id];
+      let siswaWaliParams = [sekolah_id];
 
+      // Jika ada kelas spesifik, filter wali yang siswanya di kelas tersebut
       if (kelas_id) {
-        siswaQuery = `
-          SELECT DISTINCT u.id as user_id, u.nama as user_nama, u.role
+        siswaWaliQuery = `
+          SELECT DISTINCT u.id as user_id, u.nama as user_nama, u.role, s.nama as nama_siswa
           FROM users u
           JOIN siswa s ON u.siswa_id = s.id
-          WHERE u.role = 'siswa' 
+          WHERE u.role = 'wali' 
             AND s.kelas_id = ? 
             AND u.sekolah_id = ?
         `;
-        siswaParams = [kelas_id, sekolah_id];
+        siswaWaliParams = [kelas_id, sekolah_id];
       }
 
-      const [siswaList] = await connection.execute(siswaQuery, siswaParams);
-      targetUsers.push(...siswaList);
+      const [siswaWaliList] = await connection.execute(siswaWaliQuery, siswaWaliParams);
+      console.log(`📊 Ditemukan ${siswaWaliList.length} wali murid (target siswa)`);
+      if (siswaWaliList.length > 0) {
+        console.log(`   Contoh: Wali ${siswaWaliList[0].user_nama} (siswa: ${siswaWaliList[0].nama_siswa})`);
+      }
+      
+      // Tambahkan ke target users (cek duplikat jika role_target = 'all')
+      for (const wali of siswaWaliList) {
+        if (!targetUsers.find(u => u.user_id === wali.user_id)) {
+          targetUsers.push(wali);
+        }
+      }
     }
 
     if (targetUsers.length === 0) {
@@ -11536,11 +11578,19 @@ app.get(
       );
 
       await connection.end();
+      
+      // Transform status: mapping Database → Flutter
+      // Database: 'tidak_aktif' → Flutter: 'non-aktif'
+      const transformedData = jenisPembayaran.map(item => ({
+        ...item,
+        status: item.status === 'tidak_aktif' ? 'non-aktif' : 'aktif'
+      }));
+
       console.log(
         "Berhasil mengambil data jenis pembayaran, jumlah:",
-        jenisPembayaran.length
+        transformedData.length
       );
-      res.json(jenisPembayaran);
+      res.json(transformedData);
     } catch (error) {
       console.error("ERROR GET JENIS PEMBAYARAN:", error.message);
       res.status(500).json({ error: "Gagal mengambil data jenis pembayaran" });
@@ -11556,6 +11606,10 @@ app.post(
     try {
       const { nama, deskripsi, jumlah, periode, status, tujuan } = req.body;
 
+      // Normalisasi status: mapping Flutter → Database
+      // Flutter: 'non-aktif' → Database: 'tidak_aktif'
+      const normalizedStatus = status === 'non-aktif' ? 'tidak_aktif' : 'aktif';
+
       const connection = await getConnection();
       const id = crypto.randomUUID();
 
@@ -11567,7 +11621,7 @@ app.post(
           deskripsi,
           jumlah,
           periode,
-          status,
+          normalizedStatus,
           JSON.stringify(tujuan),
           req.sekolah_id,
         ]
@@ -11591,6 +11645,12 @@ app.put(
       const { id } = req.params;
       const { nama, deskripsi, jumlah, periode, status, tujuan } = req.body;
 
+      // Normalisasi status: mapping Flutter → Database
+      // Flutter: 'non-aktif' → Database: 'tidak_aktif'
+      const normalizedStatus = status === 'non-aktif' ? 'tidak_aktif' : 'aktif';
+      
+      console.log(`Update jenis pembayaran: ${nama}, status: ${status} -> ${normalizedStatus}`);
+
       const connection = await getConnection();
 
       await connection.execute(
@@ -11600,7 +11660,7 @@ app.put(
           deskripsi,
           jumlah,
           periode,
-          status,
+          normalizedStatus,  // Gunakan normalizedStatus saja, BUKAN status
           JSON.stringify(tujuan),
           id,
           req.sekolah_id,
@@ -11725,6 +11785,40 @@ async function generateTagihanOtomatis() {
           );
 
           console.log(`Tagihan dibuat: ${tagihanId} untuk siswa ${siswa.id}`);
+
+          // ========== KIRIM NOTIFIKASI TAGIHAN ==========
+          // Ambil data lengkap untuk notifikasi
+          const [tagihanInfo] = await connection.execute(
+            `SELECT 
+              t.id as tagihan_id,
+              t.siswa_id,
+              s.nama as siswa_nama,
+              t.jumlah,
+              t.jatuh_tempo,
+              jp.nama as jenis_pembayaran_nama,
+              s.sekolah_id
+            FROM tagihan t
+            JOIN siswa s ON t.siswa_id = s.id
+            JOIN jenis_pembayaran jp ON t.jenis_pembayaran_id = jp.id
+            WHERE t.id = ?`,
+            [tagihanId]
+          );
+
+          if (tagihanInfo.length > 0) {
+            const notifData = tagihanInfo[0];
+            // Jalankan async tanpa await agar tidak menghambat proses generate
+            setImmediate(async () => {
+              try {
+                const result = await sendTagihanNotification(notifData);
+                if (result && result.success) {
+                  console.log(`✅ Notifikasi tagihan terkirim ke ${result.sent_count} wali`);
+                }
+              } catch (notifError) {
+                console.error(`❌ Error kirim notifikasi tagihan:`, notifError.message);
+              }
+            });
+          }
+          // ========== END KIRIM NOTIFIKASI ==========
         }
       }
     }
@@ -11835,7 +11929,140 @@ app.get("/api/tagihan", authenticateTokenAndSchool, async (req, res) => {
   }
 });
 
-// ==================== PEMBAYARAN ====================
+// Helper function untuk format rupiah
+function formatRupiah(amount) {
+  return new Intl.NumberFormat('id-ID', {
+    style: 'currency',
+    currency: 'IDR',
+    minimumFractionDigits: 0
+  }).format(amount);
+}
+
+// Helper function untuk format tanggal Indonesia
+function formatTanggalIndonesia(dateString) {
+  const date = new Date(dateString);
+  const options = { day: 'numeric', month: 'long', year: 'numeric' };
+  return date.toLocaleDateString('id-ID', options);
+}
+
+// Helper function: Kirim notifikasi tagihan ke wali murid
+async function sendTagihanNotification(tagihanData, authHeader) {
+  try {
+    const {
+      tagihan_id,
+      siswa_id,
+      siswa_nama,
+      jenis_pembayaran_nama,
+      jumlah,
+      jatuh_tempo,
+      sekolah_id
+    } = tagihanData;
+
+    console.log(`💰 Mengirim notifikasi tagihan untuk siswa: ${siswa_nama}`);
+
+    const connection = await getConnection();
+
+    // Query wali murid yang terkait dengan siswa ini
+    const [waliList] = await connection.execute(
+      `SELECT u.id as user_id, u.nama as user_nama, u.role
+       FROM users u
+       WHERE u.siswa_id = ? AND u.role = 'wali' AND u.sekolah_id = ?`,
+      [siswa_id, sekolah_id]
+    );
+
+    if (waliList.length === 0) {
+      await connection.end();
+      console.log(`⚠️  Tidak ada wali murid untuk siswa: ${siswa_nama}`);
+      return { success: false, sent_count: 0 };
+    }
+
+    console.log(`📊 Target: ${waliList.length} wali murid`);
+
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const wali of waliList) {
+      try {
+        // Ambil FCM tokens untuk wali ini
+        const [tokens] = await connection.execute(
+          `SELECT token FROM fcm_tokens 
+           WHERE user_id = ? AND is_active = TRUE`,
+          [wali.user_id]
+        );
+
+        if (tokens.length === 0) {
+          console.log(`⚠️  Tidak ada token aktif untuk wali: ${wali.user_nama}`);
+          continue;
+        }
+
+        const tokenList = tokens.map(t => t.token);
+
+        // Siapkan data notifikasi
+        const title = `💰 Tagihan Baru: ${jenis_pembayaran_nama}`;
+        const body = `Tagihan ${jenis_pembayaran_nama} untuk ${siswa_nama} sebesar ${formatRupiah(jumlah)}. Jatuh tempo: ${formatTanggalIndonesia(jatuh_tempo)}`;
+
+        const fcmData = {
+          type: 'tagihan',
+          tagihan_id: tagihan_id,
+          siswa_id: siswa_id,
+          siswa_nama: siswa_nama,
+          jenis_pembayaran_nama: jenis_pembayaran_nama,
+          jumlah: jumlah.toString(),
+          jatuh_tempo: jatuh_tempo,
+          sekolah_id: sekolah_id,
+          timestamp: new Date().toISOString()
+        };
+
+        // Kirim notifikasi
+        const sendResult = await sendNotificationToMultiple(
+          tokenList,
+          title,
+          body,
+          fcmData
+        );
+
+        if (sendResult.success) {
+          // Simpan ke tabel notifications
+          try {
+            const notifId = crypto.randomUUID();
+            await connection.execute(
+              `INSERT INTO notifications (id, user_id, title, body, type, data, created_at)
+               VALUES (?, ?, ?, ?, 'tagihan', ?, NOW())`,
+              [notifId, wali.user_id, title, body, JSON.stringify(fcmData)]
+            );
+            
+            console.log(`✅ Tagihan terkirim ke wali: ${wali.user_nama}`);
+            successCount++;
+          } catch (dbError) {
+            console.error(`❌ Error save notification to DB:`, dbError.message);
+          }
+        } else {
+          failCount++;
+        }
+      } catch (error) {
+        console.error(`❌ Error mengirim tagihan ke ${wali.user_nama}:`, error.message);
+        failCount++;
+        continue;
+      }
+    }
+
+    await connection.end();
+    console.log(`📊 Tagihan: ${successCount} berhasil, ${failCount} gagal dari ${waliList.length} target`);
+    
+    return { 
+      success: successCount > 0, 
+      sent_count: successCount,
+      failed_count: failCount,
+      total_targets: waliList.length
+    };
+
+  } catch (error) {
+    console.error('❌ Error sending tagihan notification:', error.message);
+    return { success: false, sent_count: 0 };
+  }
+}
+
+// ====================END NOTIFICATION HELPERS====================
 
 // Upload bukti pembayaran (Wali Murid)
 app.post(
