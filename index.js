@@ -146,6 +146,131 @@ const sendNotificationToMultiple = async (tokens, title, body, data = {}) => {
   }
 };
 
+// ==================== PAGINATION & FILTER HELPERS ====================
+
+/**
+ * Build SQL WHERE clauses from filters
+ * @param {Object} filters - Filter object from request
+ * @param {String} tableAlias - Table alias (e.g., 's', 'g', 'k')
+ * @returns {Object} { whereClause, params }
+ */
+function buildFilterQuery(filters, tableAlias = '') {
+  const conditions = [];
+  const params = [];
+  const prefix = tableAlias ? `${tableAlias}.` : '';
+
+  // Filter: Kelas ID
+  if (filters.kelas_id) {
+    conditions.push(`${prefix}kelas_id = ?`);
+    params.push(filters.kelas_id);
+  }
+
+  // Filter: Grade Level (kelas)
+  if (filters.grade_level) {
+    conditions.push(`k.grade_level = ?`);
+    params.push(filters.grade_level);
+  }
+
+  // Filter: Jenis Kelamin
+  if (filters.jenis_kelamin) {
+    conditions.push(`${prefix}jenis_kelamin = ?`);
+    params.push(filters.jenis_kelamin);
+  }
+
+  // Filter: Mata Pelajaran ID
+  if (filters.mata_pelajaran_id) {
+    conditions.push(`${prefix}mata_pelajaran_id = ?`);
+    params.push(filters.mata_pelajaran_id);
+  }
+
+  // Filter: Semester
+  if (filters.semester) {
+    conditions.push(`${prefix}semester = ?`);
+    params.push(filters.semester);
+  }
+
+  // Filter: Tahun Ajaran
+  if (filters.tahun_ajaran) {
+    conditions.push(`${prefix}tahun_ajaran = ?`);
+    params.push(filters.tahun_ajaran);
+  }
+
+  // Filter: Jam Mengajar (range)
+  if (filters.jam_mulai && filters.jam_selesai) {
+    conditions.push(`${prefix}jam_mulai >= ? AND ${prefix}jam_selesai <= ?`);
+    params.push(filters.jam_mulai, filters.jam_selesai);
+  }
+
+  // Filter: Hari
+  if (filters.hari) {
+    conditions.push(`${prefix}hari = ?`);
+    params.push(filters.hari);
+  }
+
+  // Filter: Status (aktif/tidak_aktif)
+  if (filters.status) {
+    conditions.push(`${prefix}status = ?`);
+    params.push(filters.status);
+  }
+
+  // Filter: Search by name (untuk siswa, guru, kelas, etc.)
+  if (filters.search && filters.search.trim()) {
+    conditions.push(`${prefix}nama LIKE ?`);
+    params.push(`%${filters.search.trim()}%`);
+  }
+
+  const whereClause = conditions.length > 0 
+    ? 'AND ' + conditions.join(' AND ')
+    : '';
+
+  return { whereClause, params };
+}
+
+/**
+ * Build pagination SQL and calculate metadata
+ * @param {Number} page - Current page (1-indexed)
+ * @param {Number} limit - Items per page
+ * @returns {Object} { limitClause, offset }
+ */
+function buildPaginationQuery(page = 1, limit = 20) {
+  const currentPage = Math.max(1, parseInt(page) || 1);
+  const perPage = Math.min(100, Math.max(1, parseInt(limit) || 20)); // Max 100 per page
+  const offset = (currentPage - 1) * perPage;
+
+  return {
+    limitClause: `LIMIT ${perPage} OFFSET ${offset}`,
+    offset,
+    perPage,
+    currentPage
+  };
+}
+
+/**
+ * Calculate pagination metadata
+ * @param {Number} totalItems - Total count from database
+ * @param {Number} currentPage - Current page
+ * @param {Number} perPage - Items per page
+ * @returns {Object} Pagination metadata
+ */
+function calculatePaginationMeta(totalItems, currentPage, perPage) {
+  const totalPages = Math.ceil(totalItems / perPage);
+  const hasNextPage = currentPage < totalPages;
+  const hasPrevPage = currentPage > 1;
+
+  return {
+    total_items: totalItems,
+    total_pages: totalPages,
+    current_page: currentPage,
+    per_page: perPage,
+    has_next_page: hasNextPage,
+    has_prev_page: hasPrevPage,
+    next_page: hasNextPage ? currentPage + 1 : null,
+    prev_page: hasPrevPage ? currentPage - 1 : null
+  };
+}
+
+// ==================== END PAGINATION & FILTER HELPERS ====================
+
 // Middleware untuk koneksi database dengan error handling
 async function getConnection() {
   try {
@@ -2132,28 +2257,121 @@ app.delete("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
   }
 });
 
-// Kelola Siswa
+// Kelola Siswa (WITH PAGINATION & FILTER)
 app.get("/api/siswa", authenticateTokenAndSchool, async (req, res) => {
   try {
-    console.log("Mengambil data siswa untuk sekolah:", req.sekolah_id);
+    const { page, limit, ...filters } = req.query;
+    
+    console.log("Mengambil data siswa dengan filter:", filters);
+    console.log("Pagination:", { page, limit });
+
     const connection = await getConnection();
-    const [siswa] = await connection.execute(
-      `
-      SELECT s.*, k.nama as kelas_nama 
+
+    // Build filter query
+    const { whereClause, params: filterParams } = buildFilterQuery(filters, 's');
+    
+    // Build pagination
+    const { limitClause, currentPage, perPage } = buildPaginationQuery(page, limit);
+
+    // Count total items
+    const countQuery = `
+      SELECT COUNT(*) as total
       FROM siswa s 
       LEFT JOIN kelas k ON s.kelas_id = k.id
       WHERE s.sekolah_id = ?
-    `,
-      [req.sekolah_id]
-    );
+      ${whereClause}
+    `;
+    const [countResult] = await connection.execute(countQuery, [req.sekolah_id, ...filterParams]);
+    const totalItems = countResult[0].total;
+
+    // Get paginated data
+    const dataQuery = `
+      SELECT 
+        s.*,
+        k.nama as kelas_nama,
+        k.grade_level as grade_level
+      FROM siswa s 
+      LEFT JOIN kelas k ON s.kelas_id = k.id
+      WHERE s.sekolah_id = ?
+      ${whereClause}
+      ORDER BY s.created_at DESC
+      ${limitClause}
+    `;
+    const [siswa] = await connection.execute(dataQuery, [req.sekolah_id, ...filterParams]);
+
     await connection.end();
-    console.log("Berhasil mengambil data siswa, jumlah:", siswa.length);
-    res.json(siswa);
+
+    // Calculate pagination metadata
+    const pagination = calculatePaginationMeta(totalItems, currentPage, perPage);
+
+    console.log(`✅ Data siswa: ${siswa.length} items (Total: ${totalItems})`);
+
+    res.json({
+      success: true,
+      data: siswa,
+      pagination
+    });
   } catch (error) {
     console.error("ERROR GET SISWA:", error.message);
     res.status(500).json({ error: "Gagal mengambil data siswa" });
   }
 });
+
+// Get Filter Options for Siswa
+app.get("/api/siswa/filter-options", authenticateTokenAndSchool, async (req, res) => {
+  try {
+    console.log("Mengambil filter options untuk siswa");
+    const connection = await getConnection();
+
+    // Get available grade levels
+    const [gradeLevels] = await connection.execute(
+      `SELECT DISTINCT k.grade_level 
+       FROM kelas k 
+       WHERE k.sekolah_id = ? 
+       ORDER BY k.grade_level ASC`,
+      [req.sekolah_id]
+    );
+
+    // Get available classes
+    const [kelas] = await connection.execute(
+      `SELECT k.id, k.nama, k.grade_level
+       FROM kelas k
+       WHERE k.sekolah_id = ?
+       ORDER BY k.grade_level ASC, k.nama ASC`,
+      [req.sekolah_id]
+    );
+
+    // Gender options (static)
+    const genderOptions = [
+      { value: 'L', label: 'Laki-laki' },
+      { value: 'P', label: 'Perempuan' }
+    ];
+
+    // Status options (static)
+    const statusOptions = [
+      { value: 'active', label: 'Aktif' },
+      { value: 'inactive', label: 'Tidak Aktif' }
+    ];
+
+    await connection.end();
+
+    res.json({
+      success: true,
+      data: {
+        grade_levels: gradeLevels.map(g => g.grade_level).filter(Boolean),
+        kelas: kelas,
+        gender_options: genderOptions,
+        status_options: statusOptions
+      }
+    });
+
+    console.log("✅ Filter options berhasil diambil");
+  } catch (error) {
+    console.error("ERROR GET FILTER OPTIONS:", error.message);
+    res.status(500).json({ error: "Gagal mengambil filter options" });
+  }
+});
+
 // Get Siswa by Kelas ID
 app.get(
   "/api/siswa/kelas/:kelasId",
