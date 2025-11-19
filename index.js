@@ -1724,30 +1724,118 @@ app.get(
   }
 );
 // Kelola Kelas
+// Kelola Kelas (WITH PAGINATION & FILTER)
 app.get("/api/kelas", authenticateTokenAndSchool, async (req, res) => {
   try {
-    console.log("Mengambil data kelas untuk sekolah:", req.sekolah_id);
+    const { page, limit, grade_level, search, wali_kelas_id } = req.query;
+    
+    console.log("Mengambil data kelas dengan filter:", { grade_level, search, wali_kelas_id });
+    console.log("Pagination:", { page, limit });
+
     const connection = await getConnection();
 
-    const [kelas] = await connection.execute(
-      `
+    // Build filter conditions
+    const conditions = ["k.sekolah_id = ?"];
+    const params = [req.sekolah_id];
+
+    if (grade_level) {
+      conditions.push("k.grade_level = ?");
+      params.push(grade_level);
+    }
+    if (wali_kelas_id) {
+      conditions.push("k.wali_kelas_id = ?");
+      params.push(wali_kelas_id);
+    }
+    if (search) {
+      conditions.push("k.nama LIKE ?");
+      params.push(`%${search}%`);
+    }
+
+    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    // Build pagination
+    const { limitClause, currentPage, perPage } = buildPaginationQuery(page, limit);
+
+    // Count total items
+    const countQuery = `
+      SELECT COUNT(*) as total
+      FROM kelas k 
+      ${whereClause}
+    `;
+    const [countResult] = await connection.execute(countQuery, params);
+    const totalItems = countResult[0].total;
+
+    // Get paginated data
+    const dataQuery = `
       SELECT 
         k.*, 
         u.nama as wali_kelas_nama,
         (SELECT COUNT(*) FROM siswa s WHERE s.kelas_id = k.id) as jumlah_siswa
       FROM kelas k 
       LEFT JOIN users u ON k.wali_kelas_id = u.id
-      WHERE k.sekolah_id = ?  -- FILTER BERDASARKAN SEKOLAH
-    `,
-      [req.sekolah_id]
-    ); // Gunakan sekolah_id dari autentikasi
+      ${whereClause}
+      ORDER BY k.grade_level ASC, k.nama ASC
+      ${limitClause}
+    `;
+    const [kelas] = await connection.execute(dataQuery, params);
 
     await connection.end();
-    console.log("Berhasil mengambil data kelas, jumlah:", kelas.length);
-    res.json(kelas);
+
+    // Calculate pagination metadata
+    const pagination = calculatePaginationMeta(totalItems, currentPage, perPage);
+
+    console.log(`✅ Data kelas: ${kelas.length} items (Total: ${totalItems})`);
+
+    res.json({
+      success: true,
+      data: kelas,
+      pagination
+    });
   } catch (error) {
     console.error("ERROR GET KELAS:", error.message);
     res.status(500).json({ error: "Gagal mengambil data kelas" });
+  }
+});
+
+// Get Filter Options for Kelas
+app.get("/api/kelas/filter-options", authenticateTokenAndSchool, async (req, res) => {
+  try {
+    console.log("Mengambil filter options untuk kelas");
+    const connection = await getConnection();
+
+    // Get available grade levels
+    const [gradeLevels] = await connection.execute(
+      `SELECT DISTINCT grade_level 
+       FROM kelas 
+       WHERE sekolah_id = ? 
+       ORDER BY grade_level ASC`,
+      [req.sekolah_id]
+    );
+
+    // Get available wali kelas
+    const [waliKelas] = await connection.execute(
+      `SELECT DISTINCT u.id, u.nama
+       FROM users u
+       INNER JOIN kelas k ON u.id = k.wali_kelas_id
+       WHERE k.sekolah_id = ?
+       ORDER BY u.nama ASC`,
+      [req.sekolah_id]
+    );
+
+    await connection.end();
+
+    res.json({
+      success: true,
+      data: {
+        grade_levels: gradeLevels.map(g => g.grade_level).filter(Boolean),
+        wali_kelas: waliKelas
+      }
+    });
+
+    console.log("✅ Filter options berhasil diambil");
+  } catch (error) {
+    console.error("ERROR GET FILTER OPTIONS:", error.message);
+    res.status(500).json({ error: "Gagal mengambil filter options" });
   }
 });
 
