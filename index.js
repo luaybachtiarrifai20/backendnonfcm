@@ -10151,47 +10151,152 @@ app.get(
 );
 
 // Get RPP dengan detail lengkap
+// Get RPP dengan detail lengkap (Supports Pagination)
 app.get("/api/rpp", authenticateTokenAndSchool, async (req, res) => {
   try {
-    const { guru_id, status } = req.query;
+    const { 
+      guru_id, 
+      status, 
+      page, 
+      limit, 
+      search,
+      mata_pelajaran_id,
+      kelas_id,
+      semester,
+      tahun_ajaran
+    } = req.query;
+    
     console.log("Mengambil data RPP untuk sekolah:", req.sekolah_id);
 
-    let query = `
-      SELECT r.*, 
-        mp.nama as mata_pelajaran_nama,
-        u.nama as guru_nama,
-        k.nama as kelas_nama
-      FROM rpp r
-      JOIN mata_pelajaran mp ON r.mata_pelajaran_id = mp.id AND mp.sekolah_id = ?
-      JOIN users u ON r.guru_id = u.id AND u.sekolah_id = ?
-      LEFT JOIN kelas k ON r.kelas_id = k.id AND k.sekolah_id = ?
-      WHERE r.sekolah_id = ?
-    `;
-    let params = [
-      req.sekolah_id,
-      req.sekolah_id,
-      req.sekolah_id,
-      req.sekolah_id,
-    ];
+    // If page is present, use pagination mode
+    if (page) {
+      const { limitClause, offset, perPage, currentPage } = buildPaginationQuery(page, limit);
+      
+      // Build filter conditions
+      const conditions = [];
+      const params = [];
+      
+      // Base condition: sekolah_id
+      conditions.push('r.sekolah_id = ?');
+      params.push(req.sekolah_id);
+      
+      if (guru_id) {
+        conditions.push('r.guru_id = ?');
+        params.push(guru_id);
+      }
+      
+      if (status) {
+        conditions.push('r.status = ?');
+        params.push(status);
+      }
 
-    if (guru_id) {
-      query += " AND r.guru_id = ?";
-      params.push(guru_id);
+      if (mata_pelajaran_id) {
+        conditions.push('r.mata_pelajaran_id = ?');
+        params.push(mata_pelajaran_id);
+      }
+
+      if (kelas_id) {
+        conditions.push('r.kelas_id = ?');
+        params.push(kelas_id);
+      }
+
+      if (semester) {
+        conditions.push('r.semester = ?');
+        params.push(semester);
+      }
+
+      if (tahun_ajaran) {
+        conditions.push('r.tahun_ajaran = ?');
+        params.push(tahun_ajaran);
+      }
+      
+      if (search) {
+        const searchParam = `%${search}%`;
+        conditions.push('(r.judul LIKE ? OR mp.nama LIKE ? OR u.nama LIKE ? OR k.nama LIKE ?)');
+        params.push(searchParam, searchParam, searchParam, searchParam);
+      }
+      
+      const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+      
+      // Count total items
+      const countQuery = `
+        SELECT COUNT(*) as total 
+        FROM rpp r
+        JOIN mata_pelajaran mp ON r.mata_pelajaran_id = mp.id
+        JOIN users u ON r.guru_id = u.id
+        LEFT JOIN kelas k ON r.kelas_id = k.id
+        ${whereClause}
+      `;
+      
+      const connection = await getConnection();
+      const [countResult] = await connection.execute(countQuery, params);
+      const totalItems = countResult[0].total;
+      
+      // Get paginated data
+      const dataQuery = `
+        SELECT r.*, 
+          mp.nama as mata_pelajaran_nama,
+          u.nama as guru_nama,
+          k.nama as kelas_nama
+        FROM rpp r
+        JOIN mata_pelajaran mp ON r.mata_pelajaran_id = mp.id
+        JOIN users u ON r.guru_id = u.id
+        LEFT JOIN kelas k ON r.kelas_id = k.id
+        ${whereClause}
+        ORDER BY r.created_at DESC
+        ${limitClause}
+      `;
+      
+      const [rows] = await connection.execute(dataQuery, params);
+      await connection.end();
+      
+      const paginationMeta = calculatePaginationMeta(totalItems, currentPage, perPage);
+      
+      return res.json({
+        success: true,
+        data: rows,
+        pagination: paginationMeta
+      });
+      
+    } else {
+      // Backward compatibility: Return list directly
+      let query = `
+        SELECT r.*, 
+          mp.nama as mata_pelajaran_nama,
+          u.nama as guru_nama,
+          k.nama as kelas_nama
+        FROM rpp r
+        JOIN mata_pelajaran mp ON r.mata_pelajaran_id = mp.id AND mp.sekolah_id = ?
+        JOIN users u ON r.guru_id = u.id AND u.sekolah_id = ?
+        LEFT JOIN kelas k ON r.kelas_id = k.id AND k.sekolah_id = ?
+        WHERE r.sekolah_id = ?
+      `;
+      let params = [
+        req.sekolah_id,
+        req.sekolah_id,
+        req.sekolah_id,
+        req.sekolah_id,
+      ];
+
+      if (guru_id) {
+        query += " AND r.guru_id = ?";
+        params.push(guru_id);
+      }
+
+      if (status) {
+        query += " AND r.status = ?";
+        params.push(status);
+      }
+
+      query += " ORDER BY r.created_at DESC";
+
+      const connection = await getConnection();
+      const [rpp] = await connection.execute(query, params);
+      await connection.end();
+
+      console.log("Berhasil mengambil data RPP (Legacy List), jumlah:", rpp.length);
+      res.json(rpp);
     }
-
-    if (status) {
-      query += " AND r.status = ?";
-      params.push(status);
-    }
-
-    query += " ORDER BY r.created_at DESC";
-
-    const connection = await getConnection();
-    const [rpp] = await connection.execute(query, params);
-    await connection.end();
-
-    console.log("Berhasil mengambil data RPP, jumlah:", rpp.length);
-    res.json(rpp);
   } catch (error) {
     console.error("ERROR GET RPP:", error.message);
     res.status(500).json({ error: "Gagal mengambil data RPP" });
