@@ -14,8 +14,6 @@ const app = express();
 app.use(express.json());
 app.use(cors());
 
-
-
 // Helper function untuk menonaktifkan token yang tidak valid
 const deactivateToken = async (token) => {
   try {
@@ -51,7 +49,8 @@ const serviceAccount = require("./serviceAccountKey.json"); // Sesuaikan path
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://managemen-sekolah-f352d-default-rtdb.asia-southeast1.firebasedatabase.app/", // Updated to match Flutter app Firebase project
+  databaseURL:
+    "https://managemen-sekolah-f352d-default-rtdb.asia-southeast1.firebasedatabase.app/", // Updated to match Flutter app Firebase project
 });
 
 // Helper function untuk mengirim notifikasi
@@ -98,7 +97,7 @@ const sendNotificationToMultiple = async (tokens, title, body, data = {}) => {
   try {
     // Convert all data values to strings for FCM
     const fcmData = {};
-    Object.keys(data).forEach(key => {
+    Object.keys(data).forEach((key) => {
       fcmData[key] = String(data[key]);
     });
 
@@ -112,10 +111,12 @@ const sendNotificationToMultiple = async (tokens, title, body, data = {}) => {
     };
 
     const response = await admin.messaging().sendEachForMulticast(message);
-    
+
     // Log detailed results
-    console.log(`📊 FCM Multicast Result: Success=${response.successCount}, Failed=${response.failureCount}`);
-    
+    console.log(
+      `📊 FCM Multicast Result: Success=${response.successCount}, Failed=${response.failureCount}`
+    );
+
     // Log errors if any
     if (response.failureCount > 0) {
       response.responses.forEach((resp, idx) => {
@@ -124,20 +125,26 @@ const sendNotificationToMultiple = async (tokens, title, body, data = {}) => {
           console.error(`❌ Token ${idx + 1}/${tokens.length} failed:`);
           console.error(`   Error Code: ${error.code}`);
           console.error(`   Error Message: ${error.message}`);
-          
+
           // Specific handling for common errors
-          if (error.code === 'messaging/invalid-registration-token' || 
-              error.code === 'messaging/registration-token-not-registered') {
-            console.error(`   ⚠️  Token sudah tidak valid, harus dihapus dari database`);
+          if (
+            error.code === "messaging/invalid-registration-token" ||
+            error.code === "messaging/registration-token-not-registered"
+          ) {
+            console.error(
+              `   ⚠️  Token sudah tidak valid, harus dihapus dari database`
+            );
             console.error(`   Token: ${tokens[idx].substring(0, 20)}...`);
-          } else if (error.code === 'messaging/mismatched-credential') {
-            console.error(`   ⚠️  SenderId mismatch - Token dari Firebase project berbeda`);
+          } else if (error.code === "messaging/mismatched-credential") {
+            console.error(
+              `   ⚠️  SenderId mismatch - Token dari Firebase project berbeda`
+            );
             console.error(`   Token: ${tokens[idx].substring(0, 20)}...`);
           }
         }
       });
     }
-    
+
     return { success: response.successCount > 0, response };
   } catch (error) {
     console.error("❌ Error mengirim notifikasi multicast:", error.message);
@@ -154,10 +161,10 @@ const sendNotificationToMultiple = async (tokens, title, body, data = {}) => {
  * @param {String} tableAlias - Table alias (e.g., 's', 'g', 'k')
  * @returns {Object} { whereClause, params }
  */
-function buildFilterQuery(filters, tableAlias = '') {
+function buildFilterQuery(filters, tableAlias = "") {
   const conditions = [];
   const params = [];
-  const prefix = tableAlias ? `${tableAlias}.` : '';
+  const prefix = tableAlias ? `${tableAlias}.` : "";
 
   // Filter: Kelas ID
   if (filters.kelas_id) {
@@ -219,9 +226,8 @@ function buildFilterQuery(filters, tableAlias = '') {
     params.push(`%${filters.search.trim()}%`);
   }
 
-  const whereClause = conditions.length > 0 
-    ? 'AND ' + conditions.join(' AND ')
-    : '';
+  const whereClause =
+    conditions.length > 0 ? "AND " + conditions.join(" AND ") : "";
 
   return { whereClause, params };
 }
@@ -241,7 +247,7 @@ function buildPaginationQuery(page = 1, limit = 20) {
     limitClause: `LIMIT ${perPage} OFFSET ${offset}`,
     offset,
     perPage,
-    currentPage
+    currentPage,
   };
 }
 
@@ -265,7 +271,7 @@ function calculatePaginationMeta(totalItems, currentPage, perPage) {
     has_next_page: hasNextPage,
     has_prev_page: hasPrevPage,
     next_page: hasNextPage ? currentPage + 1 : null,
-    prev_page: hasPrevPage ? currentPage - 1 : null
+    prev_page: hasPrevPage ? currentPage - 1 : null,
   };
 }
 
@@ -819,32 +825,42 @@ app.post("/api/fcm/token", authenticateTokenAndSchool, async (req, res) => {
         "UPDATE fcm_tokens SET is_active = TRUE, device_type = ?, updated_at = NOW() WHERE user_id = ? AND token = ?",
         [device_type, req.user.id, token]
       );
-      console.log(`✅ FCM token diperbarui untuk user: ${req.user.nama || req.user.email}`);
+      console.log(
+        `✅ FCM token diperbarui untuk user: ${req.user.nama || req.user.email}`
+      );
     } else {
       // Token baru untuk user ini
-      
+
       // PENTING: Hapus token lama untuk device_type yang sama
       // Ini memastikan 1 user hanya punya 1 token per device_type
       const [oldTokens] = await connection.execute(
         "SELECT id, token FROM fcm_tokens WHERE user_id = ? AND device_type = ?",
         [req.user.id, device_type]
       );
-      
+
       if (oldTokens.length > 0) {
-        console.log(`🗑️  Menghapus ${oldTokens.length} token lama untuk user: ${req.user.nama || req.user.email}`);
+        console.log(
+          `🗑️  Menghapus ${oldTokens.length} token lama untuk user: ${
+            req.user.nama || req.user.email
+          }`
+        );
         await connection.execute(
           "DELETE FROM fcm_tokens WHERE user_id = ? AND device_type = ?",
           [req.user.id, device_type]
         );
       }
-      
+
       // Insert token baru
       const id = crypto.randomUUID();
       await connection.execute(
         "INSERT INTO fcm_tokens (id, user_id, token, device_type) VALUES (?, ?, ?, ?)",
         [id, req.user.id, token, device_type]
       );
-      console.log(`✅ FCM token baru disimpan untuk user: ${req.user.nama || req.user.email} (${device_type})`);
+      console.log(
+        `✅ FCM token baru disimpan untuk user: ${
+          req.user.nama || req.user.email
+        } (${device_type})`
+      );
     }
 
     await connection.end();
@@ -1728,8 +1744,12 @@ app.get(
 app.get("/api/kelas", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { page, limit, grade_level, search, wali_kelas_id } = req.query;
-    
-    console.log("Mengambil data kelas dengan filter:", { grade_level, search, wali_kelas_id });
+
+    console.log("Mengambil data kelas dengan filter:", {
+      grade_level,
+      search,
+      wali_kelas_id,
+    });
     console.log("Pagination:", { page, limit });
 
     const connection = await getConnection();
@@ -1751,10 +1771,14 @@ app.get("/api/kelas", authenticateTokenAndSchool, async (req, res) => {
       params.push(`%${search}%`);
     }
 
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
     // Build pagination
-    const { limitClause, currentPage, perPage } = buildPaginationQuery(page, limit);
+    const { limitClause, currentPage, perPage } = buildPaginationQuery(
+      page,
+      limit
+    );
 
     // Count total items
     const countQuery = `
@@ -1782,14 +1806,18 @@ app.get("/api/kelas", authenticateTokenAndSchool, async (req, res) => {
     await connection.end();
 
     // Calculate pagination metadata
-    const pagination = calculatePaginationMeta(totalItems, currentPage, perPage);
+    const pagination = calculatePaginationMeta(
+      totalItems,
+      currentPage,
+      perPage
+    );
 
     console.log(`✅ Data kelas: ${kelas.length} items (Total: ${totalItems})`);
 
     res.json({
       success: true,
       data: kelas,
-      pagination
+      pagination,
     });
   } catch (error) {
     console.error("ERROR GET KELAS:", error.message);
@@ -1798,46 +1826,50 @@ app.get("/api/kelas", authenticateTokenAndSchool, async (req, res) => {
 });
 
 // Get Filter Options for Kelas
-app.get("/api/kelas/filter-options", authenticateTokenAndSchool, async (req, res) => {
-  try {
-    console.log("Mengambil filter options untuk kelas");
-    const connection = await getConnection();
+app.get(
+  "/api/kelas/filter-options",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      console.log("Mengambil filter options untuk kelas");
+      const connection = await getConnection();
 
-    // Get available grade levels
-    const [gradeLevels] = await connection.execute(
-      `SELECT DISTINCT grade_level 
+      // Get available grade levels
+      const [gradeLevels] = await connection.execute(
+        `SELECT DISTINCT grade_level 
        FROM kelas 
        WHERE sekolah_id = ? 
        ORDER BY grade_level ASC`,
-      [req.sekolah_id]
-    );
+        [req.sekolah_id]
+      );
 
-    // Get available wali kelas
-    const [waliKelas] = await connection.execute(
-      `SELECT DISTINCT u.id, u.nama
+      // Get available wali kelas
+      const [waliKelas] = await connection.execute(
+        `SELECT DISTINCT u.id, u.nama
        FROM users u
        INNER JOIN kelas k ON u.id = k.wali_kelas_id
        WHERE k.sekolah_id = ?
        ORDER BY u.nama ASC`,
-      [req.sekolah_id]
-    );
+        [req.sekolah_id]
+      );
 
-    await connection.end();
+      await connection.end();
 
-    res.json({
-      success: true,
-      data: {
-        grade_levels: gradeLevels.map(g => g.grade_level).filter(Boolean),
-        wali_kelas: waliKelas
-      }
-    });
+      res.json({
+        success: true,
+        data: {
+          grade_levels: gradeLevels.map((g) => g.grade_level).filter(Boolean),
+          wali_kelas: waliKelas,
+        },
+      });
 
-    console.log("✅ Filter options berhasil diambil");
-  } catch (error) {
-    console.error("ERROR GET FILTER OPTIONS:", error.message);
-    res.status(500).json({ error: "Gagal mengambil filter options" });
+      console.log("✅ Filter options berhasil diambil");
+    } catch (error) {
+      console.error("ERROR GET FILTER OPTIONS:", error.message);
+      res.status(500).json({ error: "Gagal mengambil filter options" });
+    }
   }
-});
+);
 
 app.post("/api/export-classes", async (req, res) => {
   try {
@@ -2275,8 +2307,12 @@ app.get("/api/kelas/:id", authenticateTokenAndSchool, async (req, res) => {
 app.get("/api/guru", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { page, limit, search, kelas_id, jenis_kelamin } = req.query;
-    
-    console.log("Mengambil data guru dengan filter:", { search, kelas_id, jenis_kelamin });
+
+    console.log("Mengambil data guru dengan filter:", {
+      search,
+      kelas_id,
+      jenis_kelamin,
+    });
     console.log("Pagination:", { page, limit });
 
     const connection = await getConnection();
@@ -2298,10 +2334,14 @@ app.get("/api/guru", authenticateTokenAndSchool, async (req, res) => {
       params.push(jenis_kelamin);
     }
 
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
     // Build pagination
-    const { limitClause, currentPage, perPage } = buildPaginationQuery(page, limit);
+    const { limitClause, currentPage, perPage } = buildPaginationQuery(
+      page,
+      limit
+    );
 
     // Count total items
     const countQuery = `
@@ -2329,14 +2369,18 @@ app.get("/api/guru", authenticateTokenAndSchool, async (req, res) => {
     await connection.end();
 
     // Calculate pagination metadata
-    const pagination = calculatePaginationMeta(totalItems, currentPage, perPage);
+    const pagination = calculatePaginationMeta(
+      totalItems,
+      currentPage,
+      perPage
+    );
 
     console.log(`✅ Data guru: ${guru.length} items (Total: ${totalItems})`);
 
     res.json({
       success: true,
       data: guru,
-      pagination
+      pagination,
     });
   } catch (error) {
     console.error("ERROR GET GURU:", error.message);
@@ -2345,42 +2389,46 @@ app.get("/api/guru", authenticateTokenAndSchool, async (req, res) => {
 });
 
 // Get Filter Options for Guru
-app.get("/api/guru/filter-options", authenticateTokenAndSchool, async (req, res) => {
-  try {
-    console.log("Mengambil filter options untuk guru");
-    const connection = await getConnection();
+app.get(
+  "/api/guru/filter-options",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      console.log("Mengambil filter options untuk guru");
+      const connection = await getConnection();
 
-    // Get available kelas
-    const [kelas] = await connection.execute(
-      `SELECT id, nama, grade_level 
+      // Get available kelas
+      const [kelas] = await connection.execute(
+        `SELECT id, nama, grade_level 
        FROM kelas 
        WHERE sekolah_id = ? 
        ORDER BY grade_level ASC, nama ASC`,
-      [req.sekolah_id]
-    );
+        [req.sekolah_id]
+      );
 
-    // Gender options (static)
-    const genderOptions = [
-      { value: 'L', label: 'Laki-laki' },
-      { value: 'P', label: 'Perempuan' }
-    ];
+      // Gender options (static)
+      const genderOptions = [
+        { value: "L", label: "Laki-laki" },
+        { value: "P", label: "Perempuan" },
+      ];
 
-    await connection.end();
+      await connection.end();
 
-    res.json({
-      success: true,
-      data: {
-        kelas: kelas,
-        gender_options: genderOptions
-      }
-    });
+      res.json({
+        success: true,
+        data: {
+          kelas: kelas,
+          gender_options: genderOptions,
+        },
+      });
 
-    console.log("✅ Filter options berhasil diambil");
-  } catch (error) {
-    console.error("ERROR GET FILTER OPTIONS:", error.message);
-    res.status(500).json({ error: "Gagal mengambil filter options" });
+      console.log("✅ Filter options berhasil diambil");
+    } catch (error) {
+      console.error("ERROR GET FILTER OPTIONS:", error.message);
+      res.status(500).json({ error: "Gagal mengambil filter options" });
+    }
   }
-});
+);
 
 // Delete Guru
 app.delete("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
@@ -2435,17 +2483,23 @@ app.delete("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
 app.get("/api/siswa", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { page, limit, ...filters } = req.query;
-    
+
     console.log("Mengambil data siswa dengan filter:", filters);
     console.log("Pagination:", { page, limit });
 
     const connection = await getConnection();
 
     // Build filter query
-    const { whereClause, params: filterParams } = buildFilterQuery(filters, 's');
-    
+    const { whereClause, params: filterParams } = buildFilterQuery(
+      filters,
+      "s"
+    );
+
     // Build pagination
-    const { limitClause, currentPage, perPage } = buildPaginationQuery(page, limit);
+    const { limitClause, currentPage, perPage } = buildPaginationQuery(
+      page,
+      limit
+    );
 
     // Count total items
     const countQuery = `
@@ -2455,7 +2509,10 @@ app.get("/api/siswa", authenticateTokenAndSchool, async (req, res) => {
       WHERE s.sekolah_id = ?
       ${whereClause}
     `;
-    const [countResult] = await connection.execute(countQuery, [req.sekolah_id, ...filterParams]);
+    const [countResult] = await connection.execute(countQuery, [
+      req.sekolah_id,
+      ...filterParams,
+    ]);
     const totalItems = countResult[0].total;
 
     // Get paginated data
@@ -2471,19 +2528,26 @@ app.get("/api/siswa", authenticateTokenAndSchool, async (req, res) => {
       ORDER BY s.created_at DESC
       ${limitClause}
     `;
-    const [siswa] = await connection.execute(dataQuery, [req.sekolah_id, ...filterParams]);
+    const [siswa] = await connection.execute(dataQuery, [
+      req.sekolah_id,
+      ...filterParams,
+    ]);
 
     await connection.end();
 
     // Calculate pagination metadata
-    const pagination = calculatePaginationMeta(totalItems, currentPage, perPage);
+    const pagination = calculatePaginationMeta(
+      totalItems,
+      currentPage,
+      perPage
+    );
 
     console.log(`✅ Data siswa: ${siswa.length} items (Total: ${totalItems})`);
 
     res.json({
       success: true,
       data: siswa,
-      pagination
+      pagination,
     });
   } catch (error) {
     console.error("ERROR GET SISWA:", error.message);
@@ -2492,59 +2556,63 @@ app.get("/api/siswa", authenticateTokenAndSchool, async (req, res) => {
 });
 
 // Get Filter Options for Siswa
-app.get("/api/siswa/filter-options", authenticateTokenAndSchool, async (req, res) => {
-  try {
-    console.log("Mengambil filter options untuk siswa");
-    const connection = await getConnection();
+app.get(
+  "/api/siswa/filter-options",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      console.log("Mengambil filter options untuk siswa");
+      const connection = await getConnection();
 
-    // Get available grade levels
-    const [gradeLevels] = await connection.execute(
-      `SELECT DISTINCT k.grade_level 
+      // Get available grade levels
+      const [gradeLevels] = await connection.execute(
+        `SELECT DISTINCT k.grade_level 
        FROM kelas k 
        WHERE k.sekolah_id = ? 
        ORDER BY k.grade_level ASC`,
-      [req.sekolah_id]
-    );
+        [req.sekolah_id]
+      );
 
-    // Get available classes
-    const [kelas] = await connection.execute(
-      `SELECT k.id, k.nama, k.grade_level
+      // Get available classes
+      const [kelas] = await connection.execute(
+        `SELECT k.id, k.nama, k.grade_level
        FROM kelas k
        WHERE k.sekolah_id = ?
        ORDER BY k.grade_level ASC, k.nama ASC`,
-      [req.sekolah_id]
-    );
+        [req.sekolah_id]
+      );
 
-    // Gender options (static)
-    const genderOptions = [
-      { value: 'L', label: 'Laki-laki' },
-      { value: 'P', label: 'Perempuan' }
-    ];
+      // Gender options (static)
+      const genderOptions = [
+        { value: "L", label: "Laki-laki" },
+        { value: "P", label: "Perempuan" },
+      ];
 
-    // Status options (static)
-    const statusOptions = [
-      { value: 'active', label: 'Aktif' },
-      { value: 'inactive', label: 'Tidak Aktif' }
-    ];
+      // Status options (static)
+      const statusOptions = [
+        { value: "active", label: "Aktif" },
+        { value: "inactive", label: "Tidak Aktif" },
+      ];
 
-    await connection.end();
+      await connection.end();
 
-    res.json({
-      success: true,
-      data: {
-        grade_levels: gradeLevels.map(g => g.grade_level).filter(Boolean),
-        kelas: kelas,
-        gender_options: genderOptions,
-        status_options: statusOptions
-      }
-    });
+      res.json({
+        success: true,
+        data: {
+          grade_levels: gradeLevels.map((g) => g.grade_level).filter(Boolean),
+          kelas: kelas,
+          gender_options: genderOptions,
+          status_options: statusOptions,
+        },
+      });
 
-    console.log("✅ Filter options berhasil diambil");
-  } catch (error) {
-    console.error("ERROR GET FILTER OPTIONS:", error.message);
-    res.status(500).json({ error: "Gagal mengambil filter options" });
+      console.log("✅ Filter options berhasil diambil");
+    } catch (error) {
+      console.error("ERROR GET FILTER OPTIONS:", error.message);
+      res.status(500).json({ error: "Gagal mengambil filter options" });
+    }
   }
-});
+);
 
 // Get Siswa by Kelas ID
 app.get(
@@ -4168,8 +4236,11 @@ app.get("/api/siswa/:id", authenticateTokenAndSchool, async (req, res) => {
 app.get("/api/mata-pelajaran", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { page, limit, search, status } = req.query;
-    
-    console.log("Mengambil data mata pelajaran dengan filter:", { search, status });
+
+    console.log("Mengambil data mata pelajaran dengan filter:", {
+      search,
+      status,
+    });
     console.log("Pagination:", { page, limit });
 
     const connection = await getConnection();
@@ -4179,7 +4250,9 @@ app.get("/api/mata-pelajaran", authenticateTokenAndSchool, async (req, res) => {
     const params = [req.sekolah_id];
 
     if (search) {
-      conditions.push("(mp.nama LIKE ? OR mp.kode LIKE ? OR mp.deskripsi LIKE ?)");
+      conditions.push(
+        "(mp.nama LIKE ? OR mp.kode LIKE ? OR mp.deskripsi LIKE ?)"
+      );
       params.push(`%${search}%`, `%${search}%`, `%${search}%`);
     }
     if (status) {
@@ -4187,10 +4260,14 @@ app.get("/api/mata-pelajaran", authenticateTokenAndSchool, async (req, res) => {
       params.push(status);
     }
 
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
     // Build pagination
-    const { limitClause, currentPage, perPage } = buildPaginationQuery(page, limit);
+    const { limitClause, currentPage, perPage } = buildPaginationQuery(
+      page,
+      limit
+    );
 
     // Count total items
     const countQuery = `
@@ -4215,14 +4292,20 @@ app.get("/api/mata-pelajaran", authenticateTokenAndSchool, async (req, res) => {
     await connection.end();
 
     // Calculate pagination metadata
-    const pagination = calculatePaginationMeta(totalItems, currentPage, perPage);
+    const pagination = calculatePaginationMeta(
+      totalItems,
+      currentPage,
+      perPage
+    );
 
-    console.log(`✅ Data mata pelajaran: ${mataPelajaran.length} items (Total: ${totalItems})`);
+    console.log(
+      `✅ Data mata pelajaran: ${mataPelajaran.length} items (Total: ${totalItems})`
+    );
 
     res.json({
       success: true,
       data: mataPelajaran,
-      pagination
+      pagination,
     });
   } catch (error) {
     console.error("ERROR GET MATA PELAJARAN:", error.message);
@@ -4231,32 +4314,36 @@ app.get("/api/mata-pelajaran", authenticateTokenAndSchool, async (req, res) => {
 });
 
 // Get Filter Options for Mata Pelajaran
-app.get("/api/mata-pelajaran/filter-options", authenticateTokenAndSchool, async (req, res) => {
-  try {
-    console.log("Mengambil filter options untuk mata pelajaran");
-    const connection = await getConnection();
+app.get(
+  "/api/mata-pelajaran/filter-options",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      console.log("Mengambil filter options untuk mata pelajaran");
+      const connection = await getConnection();
 
-    // Status options (static)
-    const statusOptions = [
-      { value: 'active', label: 'Active' },
-      { value: 'inactive', label: 'Inactive' }
-    ];
+      // Status options (static)
+      const statusOptions = [
+        { value: "active", label: "Active" },
+        { value: "inactive", label: "Inactive" },
+      ];
 
-    await connection.end();
+      await connection.end();
 
-    res.json({
-      success: true,
-      data: {
-        status_options: statusOptions
-      }
-    });
+      res.json({
+        success: true,
+        data: {
+          status_options: statusOptions,
+        },
+      });
 
-    console.log("✅ Filter options berhasil diambil");
-  } catch (error) {
-    console.error("ERROR GET FILTER OPTIONS:", error.message);
-    res.status(500).json({ error: "Gagal mengambil filter options" });
+      console.log("✅ Filter options berhasil diambil");
+    } catch (error) {
+      console.error("ERROR GET FILTER OPTIONS:", error.message);
+      res.status(500).json({ error: "Gagal mengambil filter options" });
+    }
   }
-});
+);
 
 app.post("/api/export-subjects", async (req, res) => {
   try {
@@ -6093,7 +6180,7 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
       // Update jika sudah ada
       absensiId = existing[0].id;
       action = "updated";
-      
+
       await connection.execute(
         "UPDATE absensi SET status = ?, keterangan = ?, kelas_id = ?, sekolah_id = ?, updated_at = NOW() WHERE id = ?",
         [status, keterangan || "", kelas_id, req.sekolah_id, absensiId]
@@ -6103,7 +6190,7 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
       // Insert baru
       absensiId = crypto.randomUUID();
       action = "created";
-      
+
       await connection.execute(
         "INSERT INTO absensi (id, siswa_id, guru_id, mata_pelajaran_id, kelas_id, sekolah_id, tanggal, status, keterangan) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
@@ -6136,39 +6223,39 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
 
       if (siswaData.length > 0 && mapelData.length > 0) {
         // Format tanggal untuk notifikasi
-        const formattedDate = new Date(tanggal).toLocaleDateString('id-ID', {
-          weekday: 'long',
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric'
+        const formattedDate = new Date(tanggal).toLocaleDateString("id-ID", {
+          weekday: "long",
+          year: "numeric",
+          month: "long",
+          day: "numeric",
         });
 
         // Buat body notifikasi berdasarkan status
         let notificationTitle, notificationBody;
-        
-        switch(status) {
-          case 'hadir':
-            notificationTitle = '✅ Absensi Hadir';
+
+        switch (status) {
+          case "hadir":
+            notificationTitle = "✅ Absensi Hadir";
             notificationBody = `${siswaData[0].nama} hadir pada pelajaran ${mapelData[0].nama}`;
             break;
-          case 'terlambat':
-            notificationTitle = '⚠️ Keterlambatan';
+          case "terlambat":
+            notificationTitle = "⚠️ Keterlambatan";
             notificationBody = `${siswaData[0].nama} terlambat pada pelajaran ${mapelData[0].nama}`;
             break;
-          case 'izin':
-            notificationTitle = '📝 Izin';
+          case "izin":
+            notificationTitle = "📝 Izin";
             notificationBody = `${siswaData[0].nama} izin pada pelajaran ${mapelData[0].nama}`;
             break;
-          case 'sakit':
-            notificationTitle = '🏥 Sakit';
+          case "sakit":
+            notificationTitle = "🏥 Sakit";
             notificationBody = `${siswaData[0].nama} sakit pada pelajaran ${mapelData[0].nama}`;
             break;
-          case 'alpha':
-            notificationTitle = '❌ Alpha';
+          case "alpha":
+            notificationTitle = "❌ Alpha";
             notificationBody = `${siswaData[0].nama} alpha pada pelajaran ${mapelData[0].nama}`;
             break;
           default:
-            notificationTitle = '📋 Absensi';
+            notificationTitle = "📋 Absensi";
             notificationBody = `Update absensi ${siswaData[0].nama} pada ${mapelData[0].nama}`;
         }
 
@@ -6186,15 +6273,17 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
           data: {
             absensi_id: absensiId,
             action: action,
-            tanggal_formatted: formattedDate
-          }
+            tanggal_formatted: formattedDate,
+          },
         };
 
         console.log("Mengirim notifikasi absensi:", notificationBodyData);
 
         // Kirim request notifikasi - gunakan internal function, tidak perlu HTTP request
-        await sendAbsensiNotification(notificationBodyData, req.headers['authorization']);
-
+        await sendAbsensiNotification(
+          notificationBodyData,
+          req.headers["authorization"]
+        );
       }
     } catch (notifError) {
       console.error("Error dalam pengiriman notifikasi:", notifError);
@@ -6205,11 +6294,12 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
     await connection.end();
 
     return res.json({
-      message: `Absensi berhasil ${action === 'created' ? 'ditambahkan' : 'diupdate'}`,
+      message: `Absensi berhasil ${
+        action === "created" ? "ditambahkan" : "diupdate"
+      }`,
       id: absensiId,
       action: action,
     });
-
   } catch (error) {
     // Pastikan koneksi ditutup jika ada error
     if (connection) {
@@ -6221,7 +6311,8 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
 
     if (error.code === "ER_NO_SUCH_TABLE") {
       return res.status(500).json({
-        error: "Tabel absensi tidak ditemukan. Silakan buat tabel terlebih dahulu.",
+        error:
+          "Tabel absensi tidak ditemukan. Silakan buat tabel terlebih dahulu.",
       });
     }
 
@@ -6234,7 +6325,8 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
 
     if (error.code === "ER_DUP_ENTRY") {
       return res.status(400).json({
-        error: "Absensi untuk siswa ini sudah ada pada tanggal dan mata pelajaran yang sama",
+        error:
+          "Absensi untuk siswa ini sudah ada pada tanggal dan mata pelajaran yang sama",
       });
     }
 
@@ -6248,7 +6340,8 @@ app.post("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
 // Helper function untuk mengirim notifikasi absensi
 async function sendAbsensiNotification(notificationData, authHeader) {
   try {
-    const { siswa_id, status_absensi, mata_pelajaran, tanggal, data } = notificationData;
+    const { siswa_id, status_absensi, mata_pelajaran, tanggal, data } =
+      notificationData;
 
     // Dapatkan user_id wali dari siswa
     const connection = await getConnection();
@@ -6274,10 +6367,14 @@ async function sendAbsensiNotification(notificationData, authHeader) {
 
     // Buat title dan body notifikasi
     const title = getAbsensiTitle(status_absensi);
-    const body = getAbsensiBody(status_absensi, mata_pelajaran, data?.tanggal_formatted);
+    const body = getAbsensiBody(
+      status_absensi,
+      mata_pelajaran,
+      data?.tanggal_formatted
+    );
 
     const fcmData = {
-      type: 'absensi',
+      type: "absensi",
       siswa_id: siswa_id,
       status_absensi: status_absensi,
       mata_pelajaran: mata_pelajaran,
@@ -6285,10 +6382,15 @@ async function sendAbsensiNotification(notificationData, authHeader) {
       absensi_id: data?.absensi_id,
       action: data?.action,
       timestamp: new Date().toISOString(),
-      ...data
+      ...data,
     };
 
-    const result = await sendNotificationToMultiple(tokens, title, body, fcmData);
+    const result = await sendNotificationToMultiple(
+      tokens,
+      title,
+      body,
+      fcmData
+    );
 
     // Simpan ke history notifications
     const notifId = crypto.randomUUID();
@@ -6301,7 +6403,6 @@ async function sendAbsensiNotification(notificationData, authHeader) {
 
     console.log("Notifikasi absensi berhasil dikirim ke wali:", waliUserId);
     return result;
-
   } catch (error) {
     console.error("ERROR SEND ABSENSI NOTIFICATION:", error.message);
   }
@@ -6310,58 +6411,59 @@ async function sendAbsensiNotification(notificationData, authHeader) {
 // Helper function untuk title notifikasi absensi
 function getAbsensiTitle(status) {
   const titles = {
-    'hadir': '✅ Absensi Hadir',
-    'terlambat': '⚠️ Keterlambatan',
-    'izin': '📝 Izin',
-    'sakit': '🏥 Sakit',
-    'alpha': '❌ Alpha'
+    hadir: "✅ Absensi Hadir",
+    terlambat: "⚠️ Keterlambatan",
+    izin: "📝 Izin",
+    sakit: "🏥 Sakit",
+    alpha: "❌ Alpha",
   };
-  return titles[status] || '📋 Update Absensi';
+  return titles[status] || "📋 Update Absensi";
 }
 
 // Helper function untuk body notifikasi absensi
 function getAbsensiBody(status, mataPelajaran, tanggalFormatted) {
   const baseBodies = {
-    'hadir': `hadir pada pelajaran ${mataPelajaran}`,
-    'terlambat': `terlambat pada pelajaran ${mataPelajaran}`,
-    'izin': `izin pada pelajaran ${mataPelajaran}`,
-    'sakit': `sakit pada pelajaran ${mataPelajaran}`,
-    'alpha': `alpha pada pelajaran ${mataPelajaran}`
+    hadir: `hadir pada pelajaran ${mataPelajaran}`,
+    terlambat: `terlambat pada pelajaran ${mataPelajaran}`,
+    izin: `izin pada pelajaran ${mataPelajaran}`,
+    sakit: `sakit pada pelajaran ${mataPelajaran}`,
+    alpha: `alpha pada pelajaran ${mataPelajaran}`,
   };
-  
-  const baseBody = baseBodies[status] || `ada update absensi pada ${mataPelajaran}`;
-  
+
+  const baseBody =
+    baseBodies[status] || `ada update absensi pada ${mataPelajaran}`;
+
   if (tanggalFormatted) {
     return `Anak Anda ${baseBody} - ${tanggalFormatted}`;
   }
-  
+
   return `Anak Anda ${baseBody}`;
 }
 
 // Helper function untuk mengirim notifikasi aktivitas kelas
 async function sendClassActivityNotification(activityData, authHeader) {
   try {
-    const { 
-      kegiatan_id, 
-      kelas_id, 
-      judul, 
+    const {
+      kegiatan_id,
+      kelas_id,
+      judul,
       deskripsi,
       jenis,
       target,
       mata_pelajaran,
       guru_nama,
       tanggal,
-      siswa_target 
+      siswa_target,
     } = activityData;
 
     const connection = await getConnection();
 
     // Dapatkan daftar siswa berdasarkan target
     let siswaList = [];
-    
-    if (target === 'khusus' && siswa_target && siswa_target.length > 0) {
+
+    if (target === "khusus" && siswa_target && siswa_target.length > 0) {
       // Untuk target khusus, ambil siswa yang ditarget
-      const placeholders = siswa_target.map(() => '?').join(',');
+      const placeholders = siswa_target.map(() => "?").join(",");
       const [siswa] = await connection.execute(
         `SELECT id, nama FROM siswa WHERE id IN (${placeholders})`,
         siswa_target
@@ -6409,7 +6511,7 @@ async function sendClassActivityNotification(activityData, authHeader) {
         const body = getActivityBody(jenis, judul, mata_pelajaran, siswa.nama);
 
         const fcmData = {
-          type: 'class_activity',
+          type: "class_activity",
           kegiatan_id: kegiatan_id,
           siswa_id: siswa.id,
           siswa_nama: siswa.nama,
@@ -6421,28 +6523,52 @@ async function sendClassActivityNotification(activityData, authHeader) {
           mata_pelajaran: mata_pelajaran,
           guru_nama: guru_nama,
           tanggal: tanggal,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
         };
 
-        const result = await sendNotificationToMultiple(tokens, title, body, fcmData);
+        const result = await sendNotificationToMultiple(
+          tokens,
+          title,
+          body,
+          fcmData
+        );
 
         // Simpan ke history notifications
         try {
           const notifId = crypto.randomUUID();
           await connection.execute(
             "INSERT INTO notifications (id, user_id, title, body, type, data) VALUES (?, ?, ?, ?, ?, ?)",
-            [notifId, waliUserId, title, body, 'class_activity', JSON.stringify(fcmData)]
+            [
+              notifId,
+              waliUserId,
+              title,
+              body,
+              "class_activity",
+              JSON.stringify(fcmData),
+            ]
           );
-          console.log(`✅ Notifikasi tersimpan ke database untuk wali: ${wali[0].wali_nama}`);
+          console.log(
+            `✅ Notifikasi tersimpan ke database untuk wali: ${wali[0].wali_nama}`
+          );
         } catch (dbError) {
-          console.error(`❌ Error menyimpan notifikasi ke database untuk siswa ${siswa.nama}:`, dbError.message);
-          console.error(`SQL Error Code: ${dbError.code}, SQL State: ${dbError.sqlState}`);
+          console.error(
+            `❌ Error menyimpan notifikasi ke database untuk siswa ${siswa.nama}:`,
+            dbError.message
+          );
+          console.error(
+            `SQL Error Code: ${dbError.code}, SQL State: ${dbError.sqlState}`
+          );
           // Lanjutkan meskipun gagal simpan ke database
         }
 
-        console.log(`✅ Notifikasi aktivitas kelas berhasil dikirim ke wali: ${wali[0].wali_nama} untuk siswa: ${siswa.nama}`);
+        console.log(
+          `✅ Notifikasi aktivitas kelas berhasil dikirim ke wali: ${wali[0].wali_nama} untuk siswa: ${siswa.nama}`
+        );
       } catch (error) {
-        console.error(`❌ Error mengirim notifikasi untuk siswa ${siswa.nama}:`, error.message);
+        console.error(
+          `❌ Error mengirim notifikasi untuk siswa ${siswa.nama}:`,
+          error.message
+        );
         console.error(`Error Stack:`, error.stack);
         // Lanjutkan ke siswa berikutnya
         continue;
@@ -6451,7 +6577,6 @@ async function sendClassActivityNotification(activityData, authHeader) {
 
     await connection.end();
     return { success: true, sent_count: siswaList.length };
-
   } catch (error) {
     console.error("ERROR SEND CLASS ACTIVITY NOTIFICATION:", error.message);
   }
@@ -6460,49 +6585,55 @@ async function sendClassActivityNotification(activityData, authHeader) {
 // Helper function untuk title notifikasi aktivitas
 function getActivityTitle(jenis) {
   const titles = {
-    'tugas': '📝 Tugas Baru',
-    'pr': '📚 PR Baru',
-    'ujian': '📋 Ujian',
-    'materi': '📖 Materi Baru',
-    'pengumuman': '📢 Pengumuman',
-    'kegiatan': '🎯 Kegiatan Baru'
+    tugas: "📝 Tugas Baru",
+    pr: "📚 PR Baru",
+    ujian: "📋 Ujian",
+    materi: "📖 Materi Baru",
+    pengumuman: "📢 Pengumuman",
+    kegiatan: "🎯 Kegiatan Baru",
   };
-  return titles[jenis] || '📌 Aktivitas Kelas';
+  return titles[jenis] || "📌 Aktivitas Kelas";
 }
 
 // Helper function untuk body notifikasi aktivitas
 function getActivityBody(jenis, judul, mataPelajaran, siswaNama) {
-  const jenisText = jenis === 'tugas' ? 'tugas' :
-                    jenis === 'pr' ? 'PR' :
-                    jenis === 'ujian' ? 'ujian' :
-                    jenis === 'materi' ? 'materi' :
-                    jenis === 'pengumuman' ? 'pengumuman' :
-                    'aktivitas';
-  
+  const jenisText =
+    jenis === "tugas"
+      ? "tugas"
+      : jenis === "pr"
+      ? "PR"
+      : jenis === "ujian"
+      ? "ujian"
+      : jenis === "materi"
+      ? "materi"
+      : jenis === "pengumuman"
+      ? "pengumuman"
+      : "aktivitas";
+
   return `${siswaNama} mendapat ${jenisText} "${judul}" untuk mata pelajaran ${mataPelajaran}`;
 }
 
 // Helper function untuk mengirim notifikasi pengumuman
 async function sendPengumumanNotification(pengumumanData, authHeader) {
   try {
-    const { 
-      pengumuman_id, 
-      judul, 
+    const {
+      pengumuman_id,
+      judul,
       konten,
       kelas_id,
       kelas_nama,
       role_target,
       prioritas,
       pembuat_nama,
-      sekolah_id
+      sekolah_id,
     } = pengumumanData;
 
     const connection = await getConnection();
 
     // Tentukan target users berdasarkan role_target dan kelas_id
     let targetUsers = [];
-    
-    if (role_target === 'wali' || role_target === 'all') {
+
+    if (role_target === "wali" || role_target === "all") {
       // Ambil wali murid
       let waliQuery = `
         SELECT DISTINCT u.id as user_id, u.nama as user_nama, u.role
@@ -6524,7 +6655,11 @@ async function sendPengumumanNotification(pengumumanData, authHeader) {
         waliParams = [kelas_id, sekolah_id];
       }
 
-      console.log(`🔍 Query wali - sekolah_id: ${sekolah_id}, kelas_id: ${kelas_id || 'semua'}`);
+      console.log(
+        `🔍 Query wali - sekolah_id: ${sekolah_id}, kelas_id: ${
+          kelas_id || "semua"
+        }`
+      );
       const [waliList] = await connection.execute(waliQuery, waliParams);
       console.log(`📊 Ditemukan ${waliList.length} wali murid`);
       if (waliList.length > 0) {
@@ -6533,7 +6668,7 @@ async function sendPengumumanNotification(pengumumanData, authHeader) {
       targetUsers.push(...waliList);
     }
 
-    if (role_target === 'guru' || role_target === 'all') {
+    if (role_target === "guru" || role_target === "all") {
       // Ambil guru
       let guruQuery = `
         SELECT DISTINCT u.id as user_id, u.nama as user_nama, u.role
@@ -6559,13 +6694,19 @@ async function sendPengumumanNotification(pengumumanData, authHeader) {
       targetUsers.push(...guruList);
     }
 
-    if (role_target === 'siswa' || role_target === 'all') {
+    if (role_target === "siswa" || role_target === "all") {
       // PENTING: Sistem ini tidak punya user siswa terpisah.
       // Ketika target adalah 'siswa', kirim notifikasi ke WALI yang memiliki siswa tersebut
-      
-      console.log(`🔍 Query siswa - sekolah_id: ${sekolah_id}, kelas_id: ${kelas_id || 'semua'}`);
-      console.log(`ℹ️  Catatan: Notifikasi untuk siswa akan dikirim ke wali murid`);
-      
+
+      console.log(
+        `🔍 Query siswa - sekolah_id: ${sekolah_id}, kelas_id: ${
+          kelas_id || "semua"
+        }`
+      );
+      console.log(
+        `ℹ️  Catatan: Notifikasi untuk siswa akan dikirim ke wali murid`
+      );
+
       // Cari wali yang memiliki siswa (siswa_id terisi)
       let siswaWaliQuery = `
         SELECT DISTINCT u.id as user_id, u.nama as user_nama, u.role, s.nama as nama_siswa
@@ -6588,15 +6729,22 @@ async function sendPengumumanNotification(pengumumanData, authHeader) {
         siswaWaliParams = [kelas_id, sekolah_id];
       }
 
-      const [siswaWaliList] = await connection.execute(siswaWaliQuery, siswaWaliParams);
-      console.log(`📊 Ditemukan ${siswaWaliList.length} wali murid (target siswa)`);
+      const [siswaWaliList] = await connection.execute(
+        siswaWaliQuery,
+        siswaWaliParams
+      );
+      console.log(
+        `📊 Ditemukan ${siswaWaliList.length} wali murid (target siswa)`
+      );
       if (siswaWaliList.length > 0) {
-        console.log(`   Contoh: Wali ${siswaWaliList[0].user_nama} (siswa: ${siswaWaliList[0].nama_siswa})`);
+        console.log(
+          `   Contoh: Wali ${siswaWaliList[0].user_nama} (siswa: ${siswaWaliList[0].nama_siswa})`
+        );
       }
-      
+
       // Tambahkan ke target users (cek duplikat jika role_target = 'all')
       for (const wali of siswaWaliList) {
-        if (!targetUsers.find(u => u.user_id === wali.user_id)) {
+        if (!targetUsers.find((u) => u.user_id === wali.user_id)) {
           targetUsers.push(wali);
         }
       }
@@ -6608,7 +6756,9 @@ async function sendPengumumanNotification(pengumumanData, authHeader) {
       return { success: false, sent_count: 0 };
     }
 
-    console.log(`📢 Target pengumuman: ${targetUsers.length} users (${role_target})`);
+    console.log(
+      `📢 Target pengumuman: ${targetUsers.length} users (${role_target})`
+    );
 
     let successCount = 0;
     let failCount = 0;
@@ -6620,7 +6770,9 @@ async function sendPengumumanNotification(pengumumanData, authHeader) {
         const tokens = await getUserFCMTokens(user.user_id);
 
         if (tokens.length === 0) {
-          console.log(`⚠️  Tidak ada token aktif untuk ${user.role}: ${user.user_nama}`);
+          console.log(
+            `⚠️  Tidak ada token aktif untuk ${user.role}: ${user.user_nama}`
+          );
           continue;
         }
 
@@ -6629,19 +6781,24 @@ async function sendPengumumanNotification(pengumumanData, authHeader) {
         const body = getPengumumanBody(judul, kelas_nama);
 
         const fcmData = {
-          type: 'pengumuman',
+          type: "pengumuman",
           pengumuman_id: pengumuman_id,
           judul: judul,
           konten: konten.substring(0, 200), // Truncate konten panjang
-          kelas_id: kelas_id || '',
-          kelas_nama: kelas_nama || '',
+          kelas_id: kelas_id || "",
+          kelas_nama: kelas_nama || "",
           role_target: role_target,
           prioritas: prioritas,
           pembuat_nama: pembuat_nama,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
         };
 
-        const result = await sendNotificationToMultiple(tokens, title, body, fcmData);
+        const result = await sendNotificationToMultiple(
+          tokens,
+          title,
+          body,
+          fcmData
+        );
 
         // Simpan ke history notifications
         if (result.success) {
@@ -6649,33 +6806,49 @@ async function sendPengumumanNotification(pengumumanData, authHeader) {
             const notifId = crypto.randomUUID();
             await connection.execute(
               "INSERT INTO notifications (id, user_id, title, body, type, data) VALUES (?, ?, ?, ?, ?, ?)",
-              [notifId, user.user_id, title, body, 'pengumuman', JSON.stringify(fcmData)]
+              [
+                notifId,
+                user.user_id,
+                title,
+                body,
+                "pengumuman",
+                JSON.stringify(fcmData),
+              ]
             );
             successCount++;
-            console.log(`✅ Pengumuman terkirim ke ${user.role}: ${user.user_nama}`);
+            console.log(
+              `✅ Pengumuman terkirim ke ${user.role}: ${user.user_nama}`
+            );
           } catch (dbError) {
-            console.error(`❌ Error menyimpan notifikasi untuk ${user.user_nama}:`, dbError.message);
+            console.error(
+              `❌ Error menyimpan notifikasi untuk ${user.user_nama}:`,
+              dbError.message
+            );
           }
         } else {
           failCount++;
         }
       } catch (error) {
-        console.error(`❌ Error mengirim pengumuman ke ${user.user_nama}:`, error.message);
+        console.error(
+          `❌ Error mengirim pengumuman ke ${user.user_nama}:`,
+          error.message
+        );
         failCount++;
         continue;
       }
     }
 
     await connection.end();
-    console.log(`📊 Pengumuman: ${successCount} berhasil, ${failCount} gagal dari ${targetUsers.length} target`);
-    
-    return { 
-      success: successCount > 0, 
+    console.log(
+      `📊 Pengumuman: ${successCount} berhasil, ${failCount} gagal dari ${targetUsers.length} target`
+    );
+
+    return {
+      success: successCount > 0,
       sent_count: successCount,
       failed_count: failCount,
-      total_targets: targetUsers.length
+      total_targets: targetUsers.length,
     };
-
   } catch (error) {
     console.error("ERROR SEND PENGUMUMAN NOTIFICATION:", error.message);
     console.error("Stack:", error.stack);
@@ -6686,11 +6859,11 @@ async function sendPengumumanNotification(pengumumanData, authHeader) {
 // Helper function untuk title notifikasi pengumuman
 function getPengumumanTitle(prioritas) {
   const titles = {
-    'urgent': '🚨 PENGUMUMAN PENTING',
-    'penting': '⚠️ Pengumuman Penting',
-    'biasa': '📢 Pengumuman'
+    urgent: "🚨 PENGUMUMAN PENTING",
+    penting: "⚠️ Pengumuman Penting",
+    biasa: "📢 Pengumuman",
   };
-  return titles[prioritas] || '📢 Pengumuman';
+  return titles[prioritas] || "📢 Pengumuman";
 }
 
 // Helper function untuk body notifikasi pengumuman
@@ -8345,9 +8518,25 @@ app.get(
   authenticateTokenAndSchool,
   async (req, res) => {
     try {
-      const { page, limit, guru_id, kelas_id, hari_id, semester_id, tahun_ajaran, search } = req.query;
-      
-      console.log("Mengambil data jadwal mengajar dengan filter:", { guru_id, kelas_id, hari_id, semester_id, tahun_ajaran, search });
+      const {
+        page,
+        limit,
+        guru_id,
+        kelas_id,
+        hari_id,
+        semester_id,
+        tahun_ajaran,
+        search,
+      } = req.query;
+
+      console.log("Mengambil data jadwal mengajar dengan filter:", {
+        guru_id,
+        kelas_id,
+        hari_id,
+        semester_id,
+        tahun_ajaran,
+        search,
+      });
       console.log("Pagination:", { page, limit });
 
       const connection = await getConnection();
@@ -8381,10 +8570,14 @@ app.get(
         params.push(`%${search}%`, `%${search}%`, `%${search}%`);
       }
 
-      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+      const whereClause =
+        conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
       // Build pagination
-      const { limitClause, currentPage, perPage } = buildPaginationQuery(page, limit);
+      const { limitClause, currentPage, perPage } = buildPaginationQuery(
+        page,
+        limit
+      );
 
       // Count total items
       const countQuery = `
@@ -8395,7 +8588,12 @@ app.get(
         JOIN kelas k ON jm.kelas_id = k.id AND k.sekolah_id = ?
         ${whereClause}
       `;
-      const countParams = [req.sekolah_id, req.sekolah_id, req.sekolah_id, ...params];
+      const countParams = [
+        req.sekolah_id,
+        req.sekolah_id,
+        req.sekolah_id,
+        ...params,
+      ];
       const [countResult] = await connection.execute(countQuery, countParams);
       const totalItems = countResult[0].total;
 
@@ -8421,20 +8619,31 @@ app.get(
         ORDER BY h.urutan, jp.jam_ke
         ${limitClause}
       `;
-      const dataParams = [req.sekolah_id, req.sekolah_id, req.sekolah_id, ...params];
+      const dataParams = [
+        req.sekolah_id,
+        req.sekolah_id,
+        req.sekolah_id,
+        ...params,
+      ];
       const [jadwal] = await connection.execute(dataQuery, dataParams);
 
       await connection.end();
 
       // Calculate pagination metadata
-      const pagination = calculatePaginationMeta(totalItems, currentPage, perPage);
+      const pagination = calculatePaginationMeta(
+        totalItems,
+        currentPage,
+        perPage
+      );
 
-      console.log(`✅ Data jadwal mengajar: ${jadwal.length} items (Total: ${totalItems})`);
+      console.log(
+        `✅ Data jadwal mengajar: ${jadwal.length} items (Total: ${totalItems})`
+      );
 
       res.json({
         success: true,
         data: jadwal,
-        pagination
+        pagination,
       });
     } catch (error) {
       console.error("ERROR GET JADWAL MENGAJAR:", error.message);
@@ -8444,61 +8653,65 @@ app.get(
 );
 
 // Get Filter Options for Jadwal Mengajar
-app.get("/api/jadwal-mengajar/filter-options", authenticateTokenAndSchool, async (req, res) => {
-  try {
-    console.log("Mengambil filter options untuk jadwal mengajar");
-    const connection = await getConnection();
+app.get(
+  "/api/jadwal-mengajar/filter-options",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      console.log("Mengambil filter options untuk jadwal mengajar");
+      const connection = await getConnection();
 
-    // Get available teachers
-    const [teachers] = await connection.execute(
-      `SELECT id, nama 
+      // Get available teachers
+      const [teachers] = await connection.execute(
+        `SELECT id, nama 
        FROM users 
        WHERE role = 'guru' AND sekolah_id = ? 
        ORDER BY nama ASC`,
-      [req.sekolah_id]
-    );
+        [req.sekolah_id]
+      );
 
-    // Get available classes
-    const [classes] = await connection.execute(
-      `SELECT id, nama, grade_level 
+      // Get available classes
+      const [classes] = await connection.execute(
+        `SELECT id, nama, grade_level 
        FROM kelas 
        WHERE sekolah_id = ? 
        ORDER BY grade_level ASC, nama ASC`,
-      [req.sekolah_id]
-    );
+        [req.sekolah_id]
+      );
 
-    // Get available days
-    const [days] = await connection.execute(
-      `SELECT id, nama, urutan 
+      // Get available days
+      const [days] = await connection.execute(
+        `SELECT id, nama, urutan 
        FROM hari 
        ORDER BY urutan ASC`
-    );
+      );
 
-    // Get available semesters
-    const [semesters] = await connection.execute(
-      `SELECT id, nama 
+      // Get available semesters
+      const [semesters] = await connection.execute(
+        `SELECT id, nama 
        FROM semester 
        ORDER BY id ASC`
-    );
+      );
 
-    await connection.end();
+      await connection.end();
 
-    res.json({
-      success: true,
-      data: {
-        teachers: teachers,
-        classes: classes,
-        days: days,
-        semesters: semesters
-      }
-    });
+      res.json({
+        success: true,
+        data: {
+          teachers: teachers,
+          classes: classes,
+          days: days,
+          semesters: semesters,
+        },
+      });
 
-    console.log("✅ Filter options berhasil diambil");
-  } catch (error) {
-    console.error("ERROR GET FILTER OPTIONS:", error.message);
-    res.status(500).json({ error: "Gagal mengambil filter options" });
+      console.log("✅ Filter options berhasil diambil");
+    } catch (error) {
+      console.error("ERROR GET FILTER OPTIONS:", error.message);
+      res.status(500).json({ error: "Gagal mengambil filter options" });
+    }
   }
-});
+);
 
 // Fungsi untuk membaca Excel jadwal mengajar dari buffer
 async function readExcelSchedulesFromBuffer(buffer) {
@@ -10959,10 +11172,96 @@ app.get(
 
 app.get("/api/kegiatan", authenticateTokenAndSchool, async (req, res) => {
   try {
-    const { guru_id, kelas_id, mata_pelajaran_id, target, tanggal } = req.query;
-    console.log("Mengambil semua kegiatan untuk sekolah:", req.sekolah_id);
+    const {
+      page,
+      limit,
+      search,
+      guru_id,
+      kelas_id,
+      mata_pelajaran_id,
+      target,
+      tanggal,
+    } = req.query;
+    console.log("Mengambil semua kegiatan untuk sekolah:", req.sekolah_id, {
+      page,
+      limit,
+      search,
+      guru_id,
+      kelas_id,
+      mata_pelajaran_id,
+      target,
+      tanggal,
+    });
 
-    let query = `
+    // Build filter conditions
+    const conditions = [
+      "kk.sekolah_id = ?",
+      "mp.sekolah_id = ?",
+      "kls.sekolah_id = ?",
+      "u.sekolah_id = ?",
+      "s.sekolah_id = ?",
+    ];
+    const params = [
+      req.sekolah_id,
+      req.sekolah_id,
+      req.sekolah_id,
+      req.sekolah_id,
+      req.sekolah_id,
+    ];
+
+    if (guru_id) {
+      conditions.push("kk.guru_id = ?");
+      params.push(guru_id);
+    }
+    if (kelas_id) {
+      conditions.push("kk.kelas_id = ?");
+      params.push(kelas_id);
+    }
+    if (mata_pelajaran_id) {
+      conditions.push("kk.mata_pelajaran_id = ?");
+      params.push(mata_pelajaran_id);
+    }
+    if (target) {
+      conditions.push("kk.target = ?");
+      params.push(target);
+    }
+    if (tanggal) {
+      conditions.push("kk.tanggal = ?");
+      params.push(tanggal);
+    }
+    if (search) {
+      conditions.push("(kk.judul LIKE ? OR kk.deskripsi LIKE ?)");
+      params.push(`%${search}%`, `%${search}%`);
+    }
+
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    // Build pagination
+    const { limitClause, currentPage, perPage } = buildPaginationQuery(
+      page,
+      limit
+    );
+
+    // Count total items
+    const countQuery = `
+      SELECT COUNT(DISTINCT kk.id) as total
+      FROM kegiatan_kelas kk
+      JOIN mata_pelajaran mp ON kk.mata_pelajaran_id = mp.id
+      JOIN kelas kls ON kk.kelas_id = kls.id
+      JOIN users u ON kk.guru_id = u.id
+      LEFT JOIN bab_materi bm ON kk.bab_id = bm.id
+      LEFT JOIN sub_bab_materi sbm ON kk.sub_bab_id = sbm.id
+      LEFT JOIN kegiatan_siswa_target kst ON kk.id = kst.kegiatan_id
+      LEFT JOIN siswa s ON kst.siswa_id = s.id
+      ${whereClause}
+    `;
+    const connection = await getConnection();
+    const [countResult] = await connection.execute(countQuery, params);
+    const totalItems = countResult[0].total;
+
+    // Get paginated data
+    const dataQuery = `
       SELECT 
         kk.*,
         mp.nama as mata_pelajaran_nama,
@@ -10972,56 +11271,37 @@ app.get("/api/kegiatan", authenticateTokenAndSchool, async (req, res) => {
         sbm.judul_sub_bab,
         GROUP_CONCAT(DISTINCT s.nama) as siswa_target_names
       FROM kegiatan_kelas kk
-      JOIN mata_pelajaran mp ON kk.mata_pelajaran_id = mp.id AND mp.sekolah_id = ?
-      JOIN kelas kls ON kk.kelas_id = kls.id AND kls.sekolah_id = ?
-      JOIN users u ON kk.guru_id = u.id AND u.sekolah_id = ?
+      JOIN mata_pelajaran mp ON kk.mata_pelajaran_id = mp.id
+      JOIN kelas kls ON kk.kelas_id = kls.id
+      JOIN users u ON kk.guru_id = u.id
       LEFT JOIN bab_materi bm ON kk.bab_id = bm.id
       LEFT JOIN sub_bab_materi sbm ON kk.sub_bab_id = sbm.id
       LEFT JOIN kegiatan_siswa_target kst ON kk.id = kst.kegiatan_id
-      LEFT JOIN siswa s ON kst.siswa_id = s.id AND s.sekolah_id = ?
-      WHERE kk.sekolah_id = ?
+      LEFT JOIN siswa s ON kst.siswa_id = s.id
+      ${whereClause}
+      GROUP BY kk.id
+      ORDER BY kk.tanggal DESC, kk.created_at DESC
+      ${limitClause}
     `;
-    let params = [
-      req.sekolah_id,
-      req.sekolah_id,
-      req.sekolah_id,
-      req.sekolah_id,
-      req.sekolah_id,
-    ];
-
-    if (guru_id) {
-      query += " AND kk.guru_id = ?";
-      params.push(guru_id);
-    }
-
-    if (kelas_id) {
-      query += " AND kk.kelas_id = ?";
-      params.push(kelas_id);
-    }
-
-    if (mata_pelajaran_id) {
-      query += " AND kk.mata_pelajaran_id = ?";
-      params.push(mata_pelajaran_id);
-    }
-
-    if (target) {
-      query += " AND kk.target = ?";
-      params.push(target);
-    }
-
-    if (tanggal) {
-      query += " AND kk.tanggal = ?";
-      params.push(tanggal);
-    }
-
-    query += " GROUP BY kk.id ORDER BY kk.tanggal DESC, kk.created_at DESC";
-
-    const connection = await getConnection();
-    const [kegiatan] = await connection.execute(query, params);
+    const [kegiatan] = await connection.execute(dataQuery, params);
     await connection.end();
 
-    console.log("Kegiatan ditemukan:", kegiatan.length);
-    res.json(kegiatan);
+    // Calculate pagination metadata
+    const pagination = calculatePaginationMeta(
+      totalItems,
+      currentPage,
+      perPage
+    );
+
+    console.log(
+      `✅ Data kegiatan: ${kegiatan.length} items (Total: ${totalItems})`
+    );
+
+    res.json({
+      success: true,
+      data: kegiatan,
+      pagination,
+    });
   } catch (error) {
     console.error("ERROR GET ALL KEGIATAN:", error.message);
     res.status(500).json({ error: "Gagal mengambil data kegiatan" });
@@ -11068,16 +11348,24 @@ app.get("/api/kegiatan/:id", authenticateTokenAndSchool, async (req, res) => {
 
     console.log("Kegiatan ditemukan:", kegiatan[0].judul);
     res.json(kegiatan[0]);
-    } catch (error) {
-      console.error("ERROR GET KEGIATAN BY ID:", error.message);
-      res.status(500).json({ error: "Gagal mengambil data kegiatan" });
-    }});
+  } catch (error) {
+    console.error("ERROR GET KEGIATAN BY ID:", error.message);
+    res.status(500).json({ error: "Gagal mengambil data kegiatan" });
+  }
+});
 
 app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { page, limit, search, prioritas, role_target, status } = req.query;
 
-    console.log(`Mengambil data pengumuman dengan filter:`, { page, limit, search, prioritas, role_target, status });
+    console.log(`Mengambil data pengumuman dengan filter:`, {
+      page,
+      limit,
+      search,
+      prioritas,
+      role_target,
+      status,
+    });
     console.log(`User role: ${req.user.role}, sekolah: ${req.sekolah_id}`);
 
     const connection = await getConnection();
@@ -11088,11 +11376,17 @@ app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
 
     // Role-based filtering (existing logic)
     if (req.user.role === "wali") {
-      conditions.push("(p.role_target LIKE 'wali' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')");
+      conditions.push(
+        "(p.role_target LIKE 'wali' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')"
+      );
     } else if (req.user.role === "guru") {
-      conditions.push("(p.role_target LIKE 'guru' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')");
+      conditions.push(
+        "(p.role_target LIKE 'guru' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')"
+      );
     } else if (req.user.role === "siswa") {
-      conditions.push("(p.role_target LIKE 'siswa' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')");
+      conditions.push(
+        "(p.role_target LIKE 'siswa' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')"
+      );
     }
     // Admin dan super_admin bisa lihat semua
 
@@ -11110,19 +11404,25 @@ app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
       params.push(role_target);
     }
     if (status) {
-      if (status === 'aktif') {
-        conditions.push("(p.tanggal_akhir >= CURDATE() OR p.tanggal_akhir IS NULL)");
-      } else if (status === 'terjadwal') {
+      if (status === "aktif") {
+        conditions.push(
+          "(p.tanggal_akhir >= CURDATE() OR p.tanggal_akhir IS NULL)"
+        );
+      } else if (status === "terjadwal") {
         conditions.push("p.tanggal_awal > CURDATE()");
-      } else if (status === 'kedaluwarsa') {
+      } else if (status === "kedaluwarsa") {
         conditions.push("p.tanggal_akhir < CURDATE()");
       }
     }
 
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const whereClause =
+      conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
     // Build pagination
-    const { limitClause, currentPage, perPage } = buildPaginationQuery(page, limit);
+    const { limitClause, currentPage, perPage } = buildPaginationQuery(
+      page,
+      limit
+    );
 
     // Count total items
     const countQuery = `
@@ -11149,14 +11449,20 @@ app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
     await connection.end();
 
     // Calculate pagination metadata
-    const pagination = calculatePaginationMeta(totalItems, currentPage, perPage);
+    const pagination = calculatePaginationMeta(
+      totalItems,
+      currentPage,
+      perPage
+    );
 
-    console.log(`✅ Data pengumuman: ${pengumuman.length} items (Total: ${totalItems})`);
+    console.log(
+      `✅ Data pengumuman: ${pengumuman.length} items (Total: ${totalItems})`
+    );
 
     res.json({
       success: true,
       data: pengumuman,
-      pagination
+      pagination,
     });
   } catch (error) {
     console.error("ERROR GET PENGUMUMAN:", error.message);
@@ -11165,45 +11471,49 @@ app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
 });
 
 // Get Filter Options for Pengumuman
-app.get("/api/pengumuman/filter-options", authenticateTokenAndSchool, async (req, res) => {
-  try {
-    console.log("Mengambil filter options untuk pengumuman");
+app.get(
+  "/api/pengumuman/filter-options",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      console.log("Mengambil filter options untuk pengumuman");
 
-    // Static filter options
-    const prioritasOptions = [
-      { value: 'biasa', label: 'Normal' },
-      { value: 'penting', label: 'Important' }
-    ];
+      // Static filter options
+      const prioritasOptions = [
+        { value: "biasa", label: "Normal" },
+        { value: "penting", label: "Important" },
+      ];
 
-    const targetOptions = [
-      { value: 'semua', label: 'All' },
-      { value: 'guru', label: 'Teachers' },
-      { value: 'siswa', label: 'Students' },
-      { value: 'wali', label: 'Parents' },
-      { value: 'admin', label: 'Admins' }
-    ];
+      const targetOptions = [
+        { value: "semua", label: "All" },
+        { value: "guru", label: "Teachers" },
+        { value: "siswa", label: "Students" },
+        { value: "wali", label: "Parents" },
+        { value: "admin", label: "Admins" },
+      ];
 
-    const statusOptions = [
-      { value: 'aktif', label: 'Active' },
-      { value: 'terjadwal', label: 'Scheduled' },
-      { value: 'kedaluwarsa', label: 'Expired' }
-    ];
+      const statusOptions = [
+        { value: "aktif", label: "Active" },
+        { value: "terjadwal", label: "Scheduled" },
+        { value: "kedaluwarsa", label: "Expired" },
+      ];
 
-    res.json({
-      success: true,
-      data: {
-        prioritas_options: prioritasOptions,
-        target_options: targetOptions,
-        status_options: statusOptions
-      }
-    });
+      res.json({
+        success: true,
+        data: {
+          prioritas_options: prioritasOptions,
+          target_options: targetOptions,
+          status_options: statusOptions,
+        },
+      });
 
-    console.log("✅ Filter options berhasil diambil");
-  } catch (error) {
-    console.error("ERROR GET FILTER OPTIONS:", error.message);
-    res.status(500).json({ error: "Gagal mengambil filter options" });
+      console.log("✅ Filter options berhasil diambil");
+    } catch (error) {
+      console.error("ERROR GET FILTER OPTIONS:", error.message);
+      res.status(500).json({ error: "Gagal mengambil filter options" });
+    }
   }
-});
+);
 
 // Get pengumuman by ID
 app.get("/api/pengumuman/:id", authenticateTokenAndSchool, async (req, res) => {
@@ -11317,7 +11627,7 @@ app.post("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
       try {
         // Buat connection baru untuk notifikasi
         const notifConnection = await getConnection();
-        
+
         // Dapatkan info lengkap pengumuman untuk notifikasi
         const [pengumumanInfo] = await notifConnection.execute(
           `SELECT 
@@ -11343,22 +11653,30 @@ app.post("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
             role_target: pengumumanInfo[0].role_target,
             prioritas: pengumumanInfo[0].prioritas,
             pembuat_nama: pengumumanInfo[0].pembuat_nama,
-            sekolah_id: req.sekolah_id
+            sekolah_id: req.sekolah_id,
           };
 
           console.log("📢 Mengirim notifikasi pengumuman:", notificationData);
-          
+
           // Kirim notifikasi
-          const result = await sendPengumumanNotification(notificationData, req.headers['authorization']);
-          
+          const result = await sendPengumumanNotification(
+            notificationData,
+            req.headers["authorization"]
+          );
+
           if (result && result.success) {
-            console.log(`✅ Pengumuman berhasil dikirim ke ${result.sent_count} dari ${result.total_targets} target users`);
+            console.log(
+              `✅ Pengumuman berhasil dikirim ke ${result.sent_count} dari ${result.total_targets} target users`
+            );
           } else {
             console.log(`⚠️  Pengumuman gagal dikirim atau tidak ada target`);
           }
         }
       } catch (notifError) {
-        console.error("❌ Error dalam pengiriman notifikasi pengumuman:", notifError.message);
+        console.error(
+          "❌ Error dalam pengiriman notifikasi pengumuman:",
+          notifError.message
+        );
         console.error("Stack:", notifError.stack);
         // Jangan gagalkan proses pembuatan pengumuman
       }
@@ -11815,7 +12133,7 @@ app.post("/api/kegiatan", authenticateTokenAndSchool, async (req, res) => {
       try {
         // Buat connection baru untuk notifikasi
         const notifConnection = await getConnection();
-        
+
         // Dapatkan info tambahan untuk notifikasi
         const [kegiatanInfo] = await notifConnection.execute(
           `SELECT 
@@ -11841,20 +12159,31 @@ app.post("/api/kegiatan", authenticateTokenAndSchool, async (req, res) => {
             mata_pelajaran: kegiatanInfo[0].mata_pelajaran,
             guru_nama: kegiatanInfo[0].guru_nama,
             tanggal: kegiatanInfo[0].tanggal,
-            siswa_target: siswa_target || []
+            siswa_target: siswa_target || [],
           };
 
-          console.log("🔔 Mengirim notifikasi aktivitas kelas:", notificationData);
-          
+          console.log(
+            "🔔 Mengirim notifikasi aktivitas kelas:",
+            notificationData
+          );
+
           // Kirim notifikasi ke wali
-          const result = await sendClassActivityNotification(notificationData, req.headers['authorization']);
-          
+          const result = await sendClassActivityNotification(
+            notificationData,
+            req.headers["authorization"]
+          );
+
           if (result && result.success) {
-            console.log(`✅ Notifikasi berhasil dikirim ke ${result.sent_count} wali murid`);
+            console.log(
+              `✅ Notifikasi berhasil dikirim ke ${result.sent_count} wali murid`
+            );
           }
         }
       } catch (notifError) {
-        console.error("❌ Error dalam pengiriman notifikasi aktivitas:", notifError.message);
+        console.error(
+          "❌ Error dalam pengiriman notifikasi aktivitas:",
+          notifError.message
+        );
         console.error("Stack:", notifError.stack);
         // Jangan gagalkan proses pembuatan kegiatan hanya karena notifikasi error
       }
@@ -12203,12 +12532,12 @@ app.get(
       );
 
       await connection.end();
-      
+
       // Transform status: mapping Database → Flutter
       // Database: 'tidak_aktif' → Flutter: 'non-aktif'
-      const transformedData = jenisPembayaran.map(item => ({
+      const transformedData = jenisPembayaran.map((item) => ({
         ...item,
-        status: item.status === 'tidak_aktif' ? 'non-aktif' : 'aktif'
+        status: item.status === "tidak_aktif" ? "non-aktif" : "aktif",
       }));
 
       console.log(
@@ -12233,7 +12562,7 @@ app.post(
 
       // Normalisasi status: mapping Flutter → Database
       // Flutter: 'non-aktif' → Database: 'tidak_aktif'
-      const normalizedStatus = status === 'non-aktif' ? 'tidak_aktif' : 'aktif';
+      const normalizedStatus = status === "non-aktif" ? "tidak_aktif" : "aktif";
 
       const connection = await getConnection();
       const id = crypto.randomUUID();
@@ -12272,9 +12601,11 @@ app.put(
 
       // Normalisasi status: mapping Flutter → Database
       // Flutter: 'non-aktif' → Database: 'tidak_aktif'
-      const normalizedStatus = status === 'non-aktif' ? 'tidak_aktif' : 'aktif';
-      
-      console.log(`Update jenis pembayaran: ${nama}, status: ${status} -> ${normalizedStatus}`);
+      const normalizedStatus = status === "non-aktif" ? "tidak_aktif" : "aktif";
+
+      console.log(
+        `Update jenis pembayaran: ${nama}, status: ${status} -> ${normalizedStatus}`
+      );
 
       const connection = await getConnection();
 
@@ -12285,7 +12616,7 @@ app.put(
           deskripsi,
           jumlah,
           periode,
-          normalizedStatus,  // Gunakan normalizedStatus saja, BUKAN status
+          normalizedStatus, // Gunakan normalizedStatus saja, BUKAN status
           JSON.stringify(tujuan),
           id,
           req.sekolah_id,
@@ -12436,10 +12767,15 @@ async function generateTagihanOtomatis() {
               try {
                 const result = await sendTagihanNotification(notifData);
                 if (result && result.success) {
-                  console.log(`✅ Notifikasi tagihan terkirim ke ${result.sent_count} wali`);
+                  console.log(
+                    `✅ Notifikasi tagihan terkirim ke ${result.sent_count} wali`
+                  );
                 }
               } catch (notifError) {
-                console.error(`❌ Error kirim notifikasi tagihan:`, notifError.message);
+                console.error(
+                  `❌ Error kirim notifikasi tagihan:`,
+                  notifError.message
+                );
               }
             });
           }
@@ -12556,18 +12892,18 @@ app.get("/api/tagihan", authenticateTokenAndSchool, async (req, res) => {
 
 // Helper function untuk format rupiah
 function formatRupiah(amount) {
-  return new Intl.NumberFormat('id-ID', {
-    style: 'currency',
-    currency: 'IDR',
-    minimumFractionDigits: 0
+  return new Intl.NumberFormat("id-ID", {
+    style: "currency",
+    currency: "IDR",
+    minimumFractionDigits: 0,
   }).format(amount);
 }
 
 // Helper function untuk format tanggal Indonesia
 function formatTanggalIndonesia(dateString) {
   const date = new Date(dateString);
-  const options = { day: 'numeric', month: 'long', year: 'numeric' };
-  return date.toLocaleDateString('id-ID', options);
+  const options = { day: "numeric", month: "long", year: "numeric" };
+  return date.toLocaleDateString("id-ID", options);
 }
 
 // Helper function: Kirim notifikasi tagihan ke wali murid
@@ -12580,7 +12916,7 @@ async function sendTagihanNotification(tagihanData, authHeader) {
       jenis_pembayaran_nama,
       jumlah,
       jatuh_tempo,
-      sekolah_id
+      sekolah_id,
     } = tagihanData;
 
     console.log(`💰 Mengirim notifikasi tagihan untuk siswa: ${siswa_nama}`);
@@ -12616,18 +12952,22 @@ async function sendTagihanNotification(tagihanData, authHeader) {
         );
 
         if (tokens.length === 0) {
-          console.log(`⚠️  Tidak ada token aktif untuk wali: ${wali.user_nama}`);
+          console.log(
+            `⚠️  Tidak ada token aktif untuk wali: ${wali.user_nama}`
+          );
           continue;
         }
 
-        const tokenList = tokens.map(t => t.token);
+        const tokenList = tokens.map((t) => t.token);
 
         // Siapkan data notifikasi
         const title = `💰 Tagihan Baru: ${jenis_pembayaran_nama}`;
-        const body = `Tagihan ${jenis_pembayaran_nama} untuk ${siswa_nama} sebesar ${formatRupiah(jumlah)}. Jatuh tempo: ${formatTanggalIndonesia(jatuh_tempo)}`;
+        const body = `Tagihan ${jenis_pembayaran_nama} untuk ${siswa_nama} sebesar ${formatRupiah(
+          jumlah
+        )}. Jatuh tempo: ${formatTanggalIndonesia(jatuh_tempo)}`;
 
         const fcmData = {
-          type: 'tagihan',
+          type: "tagihan",
           tagihan_id: tagihan_id,
           siswa_id: siswa_id,
           siswa_nama: siswa_nama,
@@ -12635,7 +12975,7 @@ async function sendTagihanNotification(tagihanData, authHeader) {
           jumlah: jumlah.toString(),
           jatuh_tempo: jatuh_tempo,
           sekolah_id: sekolah_id,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
         };
 
         // Kirim notifikasi
@@ -12655,7 +12995,7 @@ async function sendTagihanNotification(tagihanData, authHeader) {
                VALUES (?, ?, ?, ?, 'tagihan', ?, NOW())`,
               [notifId, wali.user_id, title, body, JSON.stringify(fcmData)]
             );
-            
+
             console.log(`✅ Tagihan terkirim ke wali: ${wali.user_nama}`);
             successCount++;
           } catch (dbError) {
@@ -12665,24 +13005,28 @@ async function sendTagihanNotification(tagihanData, authHeader) {
           failCount++;
         }
       } catch (error) {
-        console.error(`❌ Error mengirim tagihan ke ${wali.user_nama}:`, error.message);
+        console.error(
+          `❌ Error mengirim tagihan ke ${wali.user_nama}:`,
+          error.message
+        );
         failCount++;
         continue;
       }
     }
 
     await connection.end();
-    console.log(`📊 Tagihan: ${successCount} berhasil, ${failCount} gagal dari ${waliList.length} target`);
-    
-    return { 
-      success: successCount > 0, 
+    console.log(
+      `📊 Tagihan: ${successCount} berhasil, ${failCount} gagal dari ${waliList.length} target`
+    );
+
+    return {
+      success: successCount > 0,
       sent_count: successCount,
       failed_count: failCount,
-      total_targets: waliList.length
+      total_targets: waliList.length,
     };
-
   } catch (error) {
-    console.error('❌ Error sending tagihan notification:', error.message);
+    console.error("❌ Error sending tagihan notification:", error.message);
     return { success: false, sent_count: 0 };
   }
 }
