@@ -1,3 +1,4 @@
+// Get filter options for kegiatan (guru, kelas, tanggal)
 const express = require("express");
 const mysql = require("mysql2/promise");
 const bcrypt = require("bcryptjs");
@@ -5699,8 +5700,15 @@ app.put("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
 // Kelola Absensi
 app.get("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
   try {
-    const { guru_id, tanggal, mata_pelajaran_id, siswa_id, kelas_id } =
-      req.query;
+    const {
+      guru_id,
+      tanggal,
+      mata_pelajaran_id,
+      siswa_id,
+      kelas_id,
+      page,
+      limit,
+    } = req.query;
     console.log("Mengambil data absensi untuk sekolah:", req.sekolah_id);
 
     let query = `
@@ -5760,6 +5768,38 @@ app.get("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
     query += " ORDER BY a.tanggal DESC, s.nama ASC";
 
     const connection = await getConnection();
+
+    // If pagination requested, return paginated response with metadata
+    if (page) {
+      const pg = buildPaginationQuery(page, limit || 20);
+
+      // Count total
+      const countQuery = `SELECT COUNT(*) as total FROM (${query}) as sub`;
+      const [countRows] = await connection.execute(countQuery, params);
+      const totalItems =
+        countRows[0] && countRows[0].total
+          ? parseInt(countRows[0].total, 10)
+          : 0;
+
+      const paginatedQuery = `${query} ${pg.limitClause}`;
+      const [absensi] = await connection.execute(paginatedQuery, params);
+
+      const pagination = calculatePaginationMeta(
+        totalItems,
+        pg.currentPage,
+        pg.perPage
+      );
+
+      await connection.end();
+
+      console.log(
+        "Berhasil mengambil data absensi (paginated), jumlah:",
+        absensi.length
+      );
+      return res.json({ success: true, data: absensi, pagination });
+    }
+
+    // No pagination - return full list (backwards compatible)
     const [absensi] = await connection.execute(query, params);
     await connection.end();
 
@@ -5770,6 +5810,126 @@ app.get("/api/absensi", authenticateTokenAndSchool, async (req, res) => {
     res.status(500).json({ error: "Gagal mengambil data absensi" });
   }
 });
+
+// Get Absensi Summary (Paginated & Filtered)
+app.get(
+  "/api/absensi/summary",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      const {
+        page,
+        limit,
+        guru_id,
+        mata_pelajaran_id,
+        kelas_id,
+        tanggal_start,
+        tanggal_end,
+        tanggal, // support single date filter too
+      } = req.query;
+
+      console.log("Mengambil summary absensi untuk sekolah:", req.sekolah_id);
+
+      const connection = await getConnection();
+
+      // Base query conditions
+      let conditions = ["a.sekolah_id = ?"];
+      let params = [req.sekolah_id];
+
+      if (guru_id) {
+        conditions.push("a.guru_id = ?");
+        params.push(guru_id);
+      }
+
+      if (mata_pelajaran_id) {
+        conditions.push("a.mata_pelajaran_id = ?");
+        params.push(mata_pelajaran_id);
+      }
+
+      if (kelas_id) {
+        conditions.push("s.kelas_id = ?");
+        params.push(kelas_id);
+      }
+
+      if (tanggal) {
+        // Specific date
+        conditions.push("DATE(a.tanggal) = ?");
+        params.push(tanggal);
+      } else if (tanggal_start && tanggal_end) {
+        // Date range
+        conditions.push("DATE(a.tanggal) BETWEEN ? AND ?");
+        params.push(tanggal_start, tanggal_end);
+      }
+
+      const whereClause = conditions.join(" AND ");
+
+      // Build pagination
+      const pg = buildPaginationQuery(page, limit || 10);
+
+      // Query to get aggregated data
+      // Group by: Mata Pelajaran, Kelas, Tanggal
+      const query = `
+      SELECT 
+        a.mata_pelajaran_id,
+        mp.nama as mata_pelajaran_nama,
+        s.kelas_id,
+        k.nama as kelas_nama,
+        DATE_FORMAT(a.tanggal, '%Y-%m-%d') as tanggal,
+        COUNT(a.id) as total_students,
+        SUM(CASE WHEN a.status = 'hadir' THEN 1 ELSE 0 END) as present,
+        SUM(CASE WHEN a.status != 'hadir' THEN 1 ELSE 0 END) as absent
+      FROM absensi a
+      JOIN siswa s ON a.siswa_id = s.id
+      JOIN kelas k ON s.kelas_id = k.id
+      JOIN mata_pelajaran mp ON a.mata_pelajaran_id = mp.id
+      WHERE ${whereClause}
+      GROUP BY a.mata_pelajaran_id, s.kelas_id, DATE(a.tanggal)
+      ORDER BY a.tanggal DESC
+      ${pg.limitClause}
+    `;
+
+      // Count total groups for pagination
+      const countQuery = `
+      SELECT COUNT(*) as total FROM (
+        SELECT 1
+        FROM absensi a
+        JOIN siswa s ON a.siswa_id = s.id
+        WHERE ${whereClause}
+        GROUP BY a.mata_pelajaran_id, s.kelas_id, DATE(a.tanggal)
+      ) as sub
+    `;
+
+      const [countRows] = await connection.execute(countQuery, params);
+      const totalItems =
+        countRows[0] && countRows[0].total
+          ? parseInt(countRows[0].total, 10)
+          : 0;
+
+      const [summary] = await connection.execute(query, params);
+
+      await connection.end();
+
+      const pagination = calculatePaginationMeta(
+        totalItems,
+        pg.currentPage,
+        pg.perPage
+      );
+
+      console.log(
+        `✅ Absensi Summary: ${summary.length} groups (Total: ${totalItems})`
+      );
+
+      res.json({
+        success: true,
+        data: summary,
+        pagination,
+      });
+    } catch (error) {
+      console.error("ERROR GET ABSENSI SUMMARY:", error.message);
+      res.status(500).json({ error: "Gagal mengambil summary absensi" });
+    }
+  }
+);
 
 // Export data absensi ke Excel
 app.post("/api/export-presence", async (req, res) => {
@@ -10154,70 +10314,74 @@ app.get(
 // Get RPP dengan detail lengkap (Supports Pagination)
 app.get("/api/rpp", authenticateTokenAndSchool, async (req, res) => {
   try {
-    const { 
-      guru_id, 
-      status, 
-      page, 
-      limit, 
+    const {
+      guru_id,
+      status,
+      page,
+      limit,
       search,
       mata_pelajaran_id,
       kelas_id,
       semester,
-      tahun_ajaran
+      tahun_ajaran,
     } = req.query;
-    
+
     console.log("Mengambil data RPP untuk sekolah:", req.sekolah_id);
 
     // If page is present, use pagination mode
     if (page) {
-      const { limitClause, offset, perPage, currentPage } = buildPaginationQuery(page, limit);
-      
+      const { limitClause, offset, perPage, currentPage } =
+        buildPaginationQuery(page, limit);
+
       // Build filter conditions
       const conditions = [];
       const params = [];
-      
+
       // Base condition: sekolah_id
-      conditions.push('r.sekolah_id = ?');
+      conditions.push("r.sekolah_id = ?");
       params.push(req.sekolah_id);
-      
+
       if (guru_id) {
-        conditions.push('r.guru_id = ?');
+        conditions.push("r.guru_id = ?");
         params.push(guru_id);
       }
-      
+
       if (status) {
-        conditions.push('r.status = ?');
+        conditions.push("r.status = ?");
         params.push(status);
       }
 
       if (mata_pelajaran_id) {
-        conditions.push('r.mata_pelajaran_id = ?');
+        conditions.push("r.mata_pelajaran_id = ?");
         params.push(mata_pelajaran_id);
       }
 
       if (kelas_id) {
-        conditions.push('r.kelas_id = ?');
+        conditions.push("r.kelas_id = ?");
         params.push(kelas_id);
       }
 
       if (semester) {
-        conditions.push('r.semester = ?');
+        conditions.push("r.semester = ?");
         params.push(semester);
       }
 
       if (tahun_ajaran) {
-        conditions.push('r.tahun_ajaran = ?');
+        conditions.push("r.tahun_ajaran = ?");
         params.push(tahun_ajaran);
       }
-      
+
       if (search) {
         const searchParam = `%${search}%`;
-        conditions.push('(r.judul LIKE ? OR mp.nama LIKE ? OR u.nama LIKE ? OR k.nama LIKE ?)');
+        conditions.push(
+          "(r.judul LIKE ? OR mp.nama LIKE ? OR u.nama LIKE ? OR k.nama LIKE ?)"
+        );
         params.push(searchParam, searchParam, searchParam, searchParam);
       }
-      
-      const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
-      
+
+      const whereClause =
+        conditions.length > 0 ? "WHERE " + conditions.join(" AND ") : "";
+
       // Count total items
       const countQuery = `
         SELECT COUNT(*) as total 
@@ -10227,11 +10391,11 @@ app.get("/api/rpp", authenticateTokenAndSchool, async (req, res) => {
         LEFT JOIN kelas k ON r.kelas_id = k.id
         ${whereClause}
       `;
-      
+
       const connection = await getConnection();
       const [countResult] = await connection.execute(countQuery, params);
       const totalItems = countResult[0].total;
-      
+
       // Get paginated data
       const dataQuery = `
         SELECT r.*, 
@@ -10246,18 +10410,21 @@ app.get("/api/rpp", authenticateTokenAndSchool, async (req, res) => {
         ORDER BY r.created_at DESC
         ${limitClause}
       `;
-      
+
       const [rows] = await connection.execute(dataQuery, params);
       await connection.end();
-      
-      const paginationMeta = calculatePaginationMeta(totalItems, currentPage, perPage);
-      
+
+      const paginationMeta = calculatePaginationMeta(
+        totalItems,
+        currentPage,
+        perPage
+      );
+
       return res.json({
         success: true,
         data: rows,
-        pagination: paginationMeta
+        pagination: paginationMeta,
       });
-      
     } else {
       // Backward compatibility: Return list directly
       let query = `
@@ -10294,7 +10461,10 @@ app.get("/api/rpp", authenticateTokenAndSchool, async (req, res) => {
       const [rpp] = await connection.execute(query, params);
       await connection.end();
 
-      console.log("Berhasil mengambil data RPP (Legacy List), jumlah:", rpp.length);
+      console.log(
+        "Berhasil mengambil data RPP (Legacy List), jumlah:",
+        rpp.length
+      );
       res.json(rpp);
     }
   } catch (error) {
@@ -10990,6 +11160,162 @@ app.post(
         details:
           process.env.NODE_ENV === "development" ? error.message : undefined,
       });
+    }
+  }
+);
+
+app.get(
+  "/api/kegiatan/filter-options",
+  authenticateTokenAndSchool,
+  async (req, res) => {
+    try {
+      console.log("Mengambil filter options untuk kegiatan");
+      const connection = await getConnection();
+
+      const { guru_id, kelas_id, tanggal, bulan, tahun, mata_pelajaran_id } =
+        req.query;
+
+      // Base params and where clause for sekolah
+      const baseParams = [req.sekolah_id];
+      let baseWhere = `WHERE k.sekolah_id = ?`;
+
+      // If guru_id provided, add to where
+      if (guru_id) {
+        baseWhere += ` AND k.guru_id = ?`;
+        baseParams.push(guru_id);
+      }
+
+      // If kelas_id provided, add to where
+      if (kelas_id) {
+        baseWhere += ` AND k.kelas_id = ?`;
+        baseParams.push(kelas_id);
+      }
+
+      // If mata_pelajaran_id provided, add to where
+      if (mata_pelajaran_id) {
+        baseWhere += ` AND k.mata_pelajaran_id = ?`;
+        baseParams.push(mata_pelajaran_id);
+      }
+
+      // If tanggal provided, try to match date (allow full datetime)
+      if (tanggal) {
+        baseWhere += ` AND DATE(k.tanggal) = ?`;
+        baseParams.push(tanggal);
+      }
+
+      // If bulan provided (1-12)
+      if (bulan) {
+        baseWhere += ` AND MONTH(k.tanggal) = ?`;
+        baseParams.push(bulan);
+      }
+
+      // If tahun provided
+      if (tahun) {
+        baseWhere += ` AND YEAR(k.tanggal) = ?`;
+        baseParams.push(tahun);
+      }
+
+      // Guru options
+      const [guruRows] = await connection.execute(
+        `SELECT DISTINCT u.id, u.nama as label
+         FROM users u
+         INNER JOIN kegiatan k ON k.guru_id = u.id
+         ${baseWhere}
+         ORDER BY u.nama ASC`,
+        baseParams
+      );
+
+      // Kelas options
+      const [kelasRows] = await connection.execute(
+        `SELECT DISTINCT kk.id, kk.nama as label
+         FROM kelas kk
+         INNER JOIN kegiatan k ON k.kelas_id = kk.id
+         ${baseWhere}
+         ORDER BY kk.nama ASC`,
+        baseParams
+      );
+
+      // If no kelas found from kegiatan (some guru may not have kegiatan entries),
+      // try to fetch kelas from mata_pelajaran_kelas via guru_mata_pelajaran mapping
+      // when a specific guru_id is provided.
+      let finalKelasRows = kelasRows;
+      if (Array.isArray(kelasRows) && kelasRows.length === 0 && guru_id) {
+        try {
+          const [fallbackKelasRows] = await connection.execute(
+            `SELECT DISTINCT kk.id, kk.nama as label
+           FROM kelas kk
+           JOIN mata_pelajaran_kelas mpk ON kk.id = mpk.kelas_id
+           JOIN guru_mata_pelajaran gmp ON mpk.mata_pelajaran_id = gmp.mata_pelajaran_id
+           WHERE gmp.guru_id = ? AND kk.sekolah_id = ?
+           ${mata_pelajaran_id ? "AND mpk.mata_pelajaran_id = ?" : ""}
+           ORDER BY kk.nama ASC`,
+            mata_pelajaran_id
+              ? [guru_id, req.sekolah_id, mata_pelajaran_id]
+              : [guru_id, req.sekolah_id]
+          );
+
+          if (
+            Array.isArray(fallbackKelasRows) &&
+            fallbackKelasRows.length > 0
+          ) {
+            finalKelasRows = fallbackKelasRows;
+          }
+        } catch (e) {
+          console.error(
+            "Error fetching fallback kelas from mata_pelajaran_kelas:",
+            e.message
+          );
+          // keep finalKelasRows as original (possibly empty)
+        }
+      }
+
+      // Tanggal options (distinct dates)
+      const [tanggalRows] = await connection.execute(
+        `SELECT DISTINCT DATE(k.tanggal) as tanggal
+         FROM kegiatan k
+         ${baseWhere}
+         ORDER BY tanggal DESC`,
+        baseParams
+      );
+
+      // Month options
+      const [monthRows] = await connection.execute(
+        `SELECT DISTINCT MONTH(k.tanggal) as bulan
+         FROM kegiatan k
+         ${baseWhere}
+         ORDER BY bulan DESC`,
+        baseParams
+      );
+
+      // Year options
+      const [yearRows] = await connection.execute(
+        `SELECT DISTINCT YEAR(k.tanggal) as tahun
+         FROM kegiatan k
+         ${baseWhere}
+         ORDER BY tahun DESC`,
+        baseParams
+      );
+
+      await connection.end();
+
+      res.json({
+        success: true,
+        data: {
+          guru_options: guruRows.map((r) => ({ id: r.id, label: r.label })),
+          kelas_options: finalKelasRows.map((r) => ({
+            id: r.id,
+            label: r.label,
+          })),
+          tanggal_options: tanggalRows.map((r) => r.tanggal),
+          bulan_options: monthRows.map((r) => r.bulan),
+          tahun_options: yearRows.map((r) => r.tahun),
+        },
+      });
+    } catch (error) {
+      console.error("ERROR GET Kegiatan filter-options:", error.message);
+      res
+        .status(500)
+        .json({ error: "Gagal mengambil filter options kegiatan" });
     }
   }
 );
