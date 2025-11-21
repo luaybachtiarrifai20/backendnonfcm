@@ -3013,7 +3013,7 @@ app.post(
 // Import siswa dari Excel - TANPA SIMPAN FILE
 app.post(
   "/api/siswa/import",
-  authenticateToken,
+  authenticateTokenAndSchool,
   excelUploadMiddleware,
   async (req, res) => {
     let connection;
@@ -3049,8 +3049,12 @@ app.post(
       );
       await connection.end();
 
-      // Proses import
-      const result = await processStudentImport(importedStudents, classList);
+      // Proses import (pass sekolah_id dari token + authenticateTokenAndSchool)
+      const result = await processStudentImport(
+        importedStudents,
+        classList,
+        req.sekolah_id
+      );
 
       console.log("Import completed:", result);
       res.json({
@@ -3230,7 +3234,7 @@ function mapExcelRowToStudent(row, rowNumber) {
 }
 
 // Fungsi processStudentImport (tetap sama seperti sebelumnya)
-async function processStudentImport(importedStudents, classList) {
+async function processStudentImport(importedStudents, classList, sekolahId) {
   let connection;
   const results = {
     success: 0,
@@ -3266,10 +3270,10 @@ async function processStudentImport(importedStudents, classList) {
           continue;
         }
 
-        // Cek NIS duplikat
+        // Cek NIS duplikat untuk sekolah ini
         const [existingNIS] = await connection.execute(
-          "SELECT id FROM siswa WHERE nis = ?",
-          [studentData.nis]
+          "SELECT id FROM siswa WHERE nis = ? AND sekolah_id = ?",
+          [studentData.nis, sekolahId]
         );
 
         if (existingNIS.length > 0) {
@@ -3291,9 +3295,9 @@ async function processStudentImport(importedStudents, classList) {
             .replace("T", " ");
           const updatedAt = createdAt;
 
-          // Insert siswa
+          // Insert siswa (include sekolah_id and email_wali)
           await connection.execute(
-            "INSERT INTO siswa (id, nis, nama, kelas_id, alamat, tanggal_lahir, jenis_kelamin, nama_wali, no_telepon, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO siswa (id, nis, nama, kelas_id, alamat, tanggal_lahir, jenis_kelamin, nama_wali, email_wali, no_telepon, sekolah_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
               studentId,
               studentData.nis,
@@ -3303,7 +3307,9 @@ async function processStudentImport(importedStudents, classList) {
               studentData.tanggal_lahir,
               studentData.jenis_kelamin,
               studentData.nama_wali,
+              studentData.email_wali,
               studentData.no_telepon,
+              sekolahId,
               createdAt,
               updatedAt,
             ]
@@ -3317,21 +3323,39 @@ async function processStudentImport(importedStudents, classList) {
               [studentData.email_wali]
             );
 
-            if (existingUsers.length === 0) {
+              if (existingUsers.length === 0) {
               const waliId = crypto.randomUUID();
               const password = "password123";
               const hashedPassword = await bcrypt.hash(password, 10);
 
               await connection.execute(
-                'INSERT INTO users (id, nama, email, password, role, siswa_id) VALUES (?, ?, ?, ?, "wali", ?)',
+                'INSERT INTO users (id, nama, email, password, role, siswa_id, sekolah_id) VALUES (?, ?, ?, ?, "wali", ?, ?)',
                 [
                   waliId,
                   studentData.nama_wali,
                   studentData.email_wali,
                   hashedPassword,
                   studentId,
+                  sekolahId,
                 ]
               );
+
+              // create users_schools and users_roles for imported wali
+              try {
+                const userSchoolId = crypto.randomUUID();
+                await connection.execute(
+                  "INSERT INTO users_schools (id, user_id, sekolah_id, is_active, created_at) VALUES (?, ?, ?, TRUE, ?)",
+                  [userSchoolId, waliId, sekolahId, createdAt]
+                );
+
+                await connection.execute(
+                  "INSERT INTO users_roles (user_school_id, role, is_active, created_at) VALUES (?, ?, TRUE, ?)",
+                  [userSchoolId, "wali", createdAt]
+                );
+              } catch (e) {
+                console.error("Failed to create users_schools/users_roles for imported wali:", e.message);
+                throw e;
+              }
             }
           }
 
@@ -3656,141 +3680,7 @@ function mapExcelRowToStudent(row, rowNumber) {
   return student;
 }
 
-// Fungsi untuk memproses import siswa
-async function processStudentImport(importedStudents, classList) {
-  let connection;
-  const results = {
-    success: 0,
-    failed: 0,
-    errors: [],
-  };
-
-  try {
-    connection = await getConnection();
-
-    for (const studentData of importedStudents) {
-      try {
-        // Validasi data required
-        if (!studentData.nis || !studentData.nama || !studentData.kelas_nama) {
-          results.failed++;
-          results.errors.push(
-            `Baris ${studentData.row_number}: Data required tidak lengkap`
-          );
-          continue;
-        }
-
-        // Cari kelas_id berdasarkan nama kelas
-        const classItem = classList.find(
-          (cls) =>
-            cls.nama.toLowerCase() === studentData.kelas_nama.toLowerCase()
-        );
-
-        if (!classItem) {
-          results.failed++;
-          results.errors.push(
-            `Baris ${studentData.row_number}: Kelas '${studentData.kelas_nama}' tidak ditemukan`
-          );
-          continue;
-        }
-
-        // Cek NIS duplikat
-        const [existingNIS] = await connection.execute(
-          "SELECT id FROM siswa WHERE nis = ?",
-          [studentData.nis]
-        );
-
-        if (existingNIS.length > 0) {
-          results.failed++;
-          results.errors.push(
-            `Baris ${studentData.row_number}: NIS '${studentData.nis}' sudah terdaftar`
-          );
-          continue;
-        }
-
-        // Mulai transaction untuk siswa ini
-        await connection.beginTransaction();
-
-        try {
-          const studentId = crypto.randomUUID();
-          const createdAt = new Date()
-            .toISOString()
-            .slice(0, 19)
-            .replace("T", " ");
-          const updatedAt = createdAt;
-
-          // Insert siswa
-          await connection.execute(
-            "INSERT INTO siswa (id, nis, nama, kelas_id, alamat, tanggal_lahir, jenis_kelamin, nama_wali, no_telepon, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-              studentId,
-              studentData.nis,
-              studentData.nama,
-              classItem.id,
-              studentData.alamat,
-              studentData.tanggal_lahir,
-              studentData.jenis_kelamin,
-              studentData.nama_wali,
-              studentData.no_telepon,
-              createdAt,
-              updatedAt,
-            ]
-          );
-
-          // Buat user wali jika email disediakan
-          if (studentData.email_wali && studentData.nama_wali) {
-            // Cek apakah email sudah terdaftar
-            const [existingUsers] = await connection.execute(
-              "SELECT id FROM users WHERE email = ?",
-              [studentData.email_wali]
-            );
-
-            if (existingUsers.length === 0) {
-              const waliId = crypto.randomUUID();
-              const password = "password123";
-              const hashedPassword = await bcrypt.hash(password, 10);
-
-              await connection.execute(
-                'INSERT INTO users (id, nama, email, password, role, siswa_id) VALUES (?, ?, ?, ?, "wali", ?)',
-                [
-                  waliId,
-                  studentData.nama_wali,
-                  studentData.email_wali,
-                  hashedPassword,
-                  studentId,
-                ]
-              );
-            }
-          }
-
-          // Commit transaction
-          await connection.commit();
-          results.success++;
-        } catch (transactionError) {
-          // Rollback jika ada error
-          await connection.rollback();
-          throw transactionError;
-        }
-      } catch (studentError) {
-        results.failed++;
-        results.errors.push(
-          `Baris ${studentData.row_number}: ${studentError.message}`
-        );
-        console.error(
-          `Error importing student ${studentData.nis}:`,
-          studentError.message
-        );
-      }
-    }
-
-    return results;
-  } catch (error) {
-    throw error;
-  } finally {
-    if (connection) {
-      await connection.end();
-    }
-  }
-}
+// (processStudentImport implemented earlier in this file and used above)
 
 // Download template Excel
 app.get("/api/siswa/template", authenticateToken, async (req, res) => {
