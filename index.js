@@ -13308,10 +13308,40 @@ app.get("/api/tagihan", authenticateTokenAndSchool, async (req, res) => {
     }
 
     query += " ORDER BY t.jatuh_tempo DESC";
-
     const connection = await getConnection();
-    const [tagihan] = await connection.execute(query, params);
 
+    // Pagination support: if page is provided, return paginated response with metadata
+    const { page, limit } = req.query;
+    if (page) {
+      const pg = buildPaginationQuery(page, limit || 10);
+
+      // Count total
+      const countQuery = `SELECT COUNT(*) as total FROM (${query}) as sub`;
+      const [countRows] = await connection.execute(countQuery, params);
+      const totalItems =
+        countRows[0] && countRows[0].total
+          ? parseInt(countRows[0].total, 10)
+          : 0;
+
+      const paginatedQuery = `${query} ${pg.limitClause}`;
+      const [tagihan] = await connection.execute(paginatedQuery, params);
+
+      const pagination = calculatePaginationMeta(
+        totalItems,
+        pg.currentPage,
+        pg.perPage
+      );
+
+      await connection.end();
+
+      console.log(
+        "Berhasil mengambil data tagihan (paginated), jumlah:",
+        tagihan.length
+      );
+      return res.json({ success: true, data: tagihan, pagination });
+    }
+
+    const [tagihan] = await connection.execute(query, params);
     await connection.end();
     console.log("Berhasil mengambil data tagihan, jumlah:", tagihan.length);
     res.json(tagihan);
