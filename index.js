@@ -3893,7 +3893,7 @@ app.post("/api/siswa", authenticateTokenAndSchool, async (req, res) => {
     try {
       // 1. Insert siswa dengan sekolah_id
       await connection.execute(
-        "INSERT INTO siswa (id, nis, nama, kelas_id, alamat, tanggal_lahir, jenis_kelamin, nama_wali, no_telepon, sekolah_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO siswa (id, nis, nama, kelas_id, alamat, tanggal_lahir, jenis_kelamin, nama_wali, email_wali, no_telepon, sekolah_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
           id,
           nis,
@@ -3903,6 +3903,7 @@ app.post("/api/siswa", authenticateTokenAndSchool, async (req, res) => {
           tanggal_lahir,
           jenis_kelamin,
           nama_wali,
+          email_wali,
           no_telepon,
           req.sekolah_id, // Tambahkan sekolah_id
           createdAt,
@@ -3939,6 +3940,39 @@ app.post("/api/siswa", authenticateTokenAndSchool, async (req, res) => {
         );
 
         console.log("User wali berhasil dibuat dengan ID:", waliId);
+        // 3. Insert user into users_schools so the wali has access to the sekolah
+        try {
+          // users_schools.id is varchar(36) in this schema — provide UUID
+          const userSchoolId = crypto.randomUUID();
+          await connection.execute(
+            "INSERT INTO users_schools (id, user_id, sekolah_id, is_active, created_at) VALUES (?, ?, ?, TRUE, ?)",
+            [userSchoolId, waliId, req.sekolah_id, createdAt]
+          );
+
+          console.log("users_schools entry created with id:", userSchoolId);
+
+          // 4. Insert default role for the user in users_roles (role = 'wali')
+          // users_roles.id is AUTO_INCREMENT int; do NOT provide id, use user_school_id (varchar)
+          const [userRoleResult] = await connection.execute(
+            "INSERT INTO users_roles (user_school_id, role, is_active, created_at) VALUES (?, ?, TRUE, ?)",
+            [userSchoolId, "wali", createdAt]
+          );
+
+          console.log(
+            "users_roles entry created, insertId:",
+            userRoleResult.insertId || null
+          );
+        } catch (e) {
+          console.error(
+            "Failed to create users_schools/users_roles for wali:",
+            e.message
+          );
+          // Rollback so that siswa and user are not partially created without proper school/role linkage
+          await connection.rollback();
+          return res.status(500).json({
+            error: "Gagal membuat akses sekolah/role untuk wali: " + e.message,
+          });
+        }
       }
 
       // Commit transaction
@@ -4032,9 +4066,9 @@ app.put("/api/siswa/:id", authenticateTokenAndSchool, async (req, res) => {
     await connection.beginTransaction();
 
     try {
-      // Update siswa
+      // Update siswa (including email_wali)
       await connection.execute(
-        "UPDATE siswa SET nis = ?, nama = ?, kelas_id = ?, alamat = ?, tanggal_lahir = ?, jenis_kelamin = ?, nama_wali = ?, no_telepon = ?, updated_at = ? WHERE id = ? AND sekolah_id = ?",
+        "UPDATE siswa SET nis = ?, nama = ?, kelas_id = ?, alamat = ?, tanggal_lahir = ?, jenis_kelamin = ?, nama_wali = ?, email_wali = ?, no_telepon = ?, updated_at = ? WHERE id = ? AND sekolah_id = ?",
         [
           nis,
           nama,
@@ -4043,6 +4077,7 @@ app.put("/api/siswa/:id", authenticateTokenAndSchool, async (req, res) => {
           tanggal_lahir,
           jenis_kelamin,
           nama_wali,
+          email_wali,
           no_telepon,
           updatedAt,
           id,
@@ -4105,6 +4140,39 @@ app.put("/api/siswa/:id", authenticateTokenAndSchool, async (req, res) => {
           );
 
           console.log("User wali baru berhasil dibuat:", waliId);
+
+          // Create users_schools and users_roles for the new wali (same pattern as creation)
+          try {
+            const userSchoolId = crypto.randomUUID();
+            await connection.execute(
+              "INSERT INTO users_schools (id, user_id, sekolah_id, is_active, created_at) VALUES (?, ?, ?, TRUE, ?)",
+              [userSchoolId, waliId, req.sekolah_id, updatedAt]
+            );
+
+            console.log("users_schools entry created with id:", userSchoolId);
+
+            await connection.execute(
+              "INSERT INTO users_roles (user_school_id, role, is_active, created_at) VALUES (?, ?, TRUE, ?)",
+              [userSchoolId, "wali", updatedAt]
+            );
+            console.log(
+              "users_roles entry created for user_school_id:",
+              userSchoolId
+            );
+          } catch (e) {
+            console.error(
+              "Failed to create users_schools/users_roles for new wali:",
+              e.message
+            );
+            await connection.rollback();
+            await connection.end();
+            return res
+              .status(500)
+              .json({
+                error:
+                  "Gagal membuat akses sekolah/role untuk wali: " + e.message,
+              });
+          }
         }
       } else if (existingWali.length > 0) {
         // Hapus user wali jika email_wali dihapus
@@ -4172,17 +4240,53 @@ app.delete("/api/siswa/:id", authenticateTokenAndSchool, async (req, res) => {
     await connection.beginTransaction();
 
     try {
-      // Hapus user wali terlebih dahulu
-      await connection.execute(
-        "DELETE FROM users WHERE siswa_id = ? AND role = 'wali'",
-        [id]
-      );
+      // Hapus user wali beserta users_roles dan users_schools terkait, lalu hapus siswa
+      try {
+        // Ambil semua user wali terkait siswa
+        const [waliUsers] = await connection.execute(
+          "SELECT id FROM users WHERE siswa_id = ? AND role = 'wali'",
+          [id]
+        );
 
-      // Hapus siswa
-      await connection.execute(
-        "DELETE FROM siswa WHERE id = ? AND sekolah_id = ?",
-        [id, req.sekolah_id] // Tambahkan sekolah_id di WHERE
-      );
+        for (const w of waliUsers) {
+          const waliUserId = w.id;
+
+          // Hapus users_roles yang terkait via users_schools
+          await connection.execute(
+            "DELETE ur FROM users_roles ur JOIN users_schools us ON ur.user_school_id = us.id WHERE us.user_id = ?",
+            [waliUserId]
+          );
+
+          // Hapus users_schools
+          await connection.execute(
+            "DELETE FROM users_schools WHERE user_id = ?",
+            [waliUserId]
+          );
+
+          // Hapus user
+          await connection.execute("DELETE FROM users WHERE id = ?", [
+            waliUserId,
+          ]);
+        }
+
+        // Hapus siswa
+        await connection.execute(
+          "DELETE FROM siswa WHERE id = ? AND sekolah_id = ?",
+          [id, req.sekolah_id] // Tambahkan sekolah_id di WHERE
+        );
+      } catch (e) {
+        console.error(
+          "Failed to remove wali related entries on delete siswa:",
+          e.message
+        );
+        await connection.rollback();
+        await connection.end();
+        return res
+          .status(500)
+          .json({
+            error: "Gagal menghapus siswa dan user wali terkait: " + e.message,
+          });
+      }
 
       // Commit transaction
       await connection.commit();
