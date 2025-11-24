@@ -3323,7 +3323,7 @@ async function processStudentImport(importedStudents, classList, sekolahId) {
               [studentData.email_wali]
             );
 
-              if (existingUsers.length === 0) {
+            if (existingUsers.length === 0) {
               const waliId = crypto.randomUUID();
               const password = "password123";
               const hashedPassword = await bcrypt.hash(password, 10);
@@ -3353,7 +3353,10 @@ async function processStudentImport(importedStudents, classList, sekolahId) {
                   [userSchoolId, "wali", createdAt]
                 );
               } catch (e) {
-                console.error("Failed to create users_schools/users_roles for imported wali:", e.message);
+                console.error(
+                  "Failed to create users_schools/users_roles for imported wali:",
+                  e.message
+                );
                 throw e;
               }
             }
@@ -4056,12 +4059,10 @@ app.put("/api/siswa/:id", authenticateTokenAndSchool, async (req, res) => {
             );
             await connection.rollback();
             await connection.end();
-            return res
-              .status(500)
-              .json({
-                error:
-                  "Gagal membuat akses sekolah/role untuk wali: " + e.message,
-              });
+            return res.status(500).json({
+              error:
+                "Gagal membuat akses sekolah/role untuk wali: " + e.message,
+            });
           }
         }
       } else if (existingWali.length > 0) {
@@ -4171,11 +4172,9 @@ app.delete("/api/siswa/:id", authenticateTokenAndSchool, async (req, res) => {
         );
         await connection.rollback();
         await connection.end();
-        return res
-          .status(500)
-          .json({
-            error: "Gagal menghapus siswa dan user wali terkait: " + e.message,
-          });
+        return res.status(500).json({
+          error: "Gagal menghapus siswa dan user wali terkait: " + e.message,
+        });
       }
 
       // Commit transaction
@@ -5176,7 +5175,7 @@ app.get("/api/guru/template", authenticateToken, async (req, res) => {
 // Import guru dari Excel
 app.post(
   "/api/guru/import",
-  authenticateToken,
+  authenticateTokenAndSchool,
   excelUploadMiddleware,
   async (req, res) => {
     let connection;
@@ -5217,11 +5216,12 @@ app.post(
       );
       await connection.end();
 
-      // Proses import
+      // Proses import (pass sekolah_id from token)
       const result = await processTeacherImport(
         importedTeachers,
         classList,
-        subjectList
+        subjectList,
+        req.sekolah_id
       );
 
       console.log("Import completed:", result);
@@ -5377,7 +5377,12 @@ function mapExcelRowToTeacher(row, rowNumber) {
 }
 
 // Fungsi processTeacherImport
-async function processTeacherImport(importedTeachers, classList, subjectList) {
+async function processTeacherImport(
+  importedTeachers,
+  classList,
+  subjectList,
+  sekolahId
+) {
   let connection;
   const results = {
     success: 0,
@@ -5453,9 +5458,9 @@ async function processTeacherImport(importedTeachers, classList, subjectList) {
           const password = "password123";
           const hashedPassword = await bcrypt.hash(password, 10);
 
-          // Insert guru
+          // Insert guru with sekolah context and create access rows
           await connection.execute(
-            "INSERT INTO users (id, nama, email, password, role, nip, kelas_id, is_wali_kelas, no_telepon) VALUES (?, ?, ?, ?, 'guru', ?, ?, ?, ?)",
+            "INSERT INTO users (id, nama, email, password, role, nip, kelas_id, is_wali_kelas, no_telepon, sekolah_id) VALUES (?, ?, ?, ?, 'guru', ?, ?, ?, ?, ?)",
             [
               teacherId,
               teacherData.nama,
@@ -5465,10 +5470,35 @@ async function processTeacherImport(importedTeachers, classList, subjectList) {
               kelasId,
               teacherData.is_wali_kelas,
               teacherData.no_telepon || "",
+              sekolahId,
             ]
           );
 
-          // Tambahkan mata pelajaran jika disediakan
+          // create users_schools and users_roles for imported guru
+          try {
+            const createdAt = new Date()
+              .toISOString()
+              .slice(0, 19)
+              .replace("T", " ");
+            const userSchoolId = crypto.randomUUID();
+            await connection.execute(
+              "INSERT INTO users_schools (id, user_id, sekolah_id, is_active, created_at) VALUES (?, ?, ?, TRUE, ?)",
+              [userSchoolId, teacherId, sekolahId, createdAt]
+            );
+
+            await connection.execute(
+              "INSERT INTO users_roles (user_school_id, role, is_active, created_at) VALUES (?, ?, TRUE, ?)",
+              [userSchoolId, "guru", createdAt]
+            );
+          } catch (e) {
+            console.error(
+              "Failed to create users_schools/users_roles for imported guru:",
+              e.message
+            );
+            throw e;
+          }
+
+          // Tambahkan mata pelajaran jika disediakan (simpan sekolah_id pada mapping)
           if (teacherData.mata_pelajaran_nama) {
             const mataPelajaranItems = teacherData.mata_pelajaran_nama
               .split(",")
@@ -5482,8 +5512,8 @@ async function processTeacherImport(importedTeachers, classList, subjectList) {
               if (subjectItem) {
                 const relationId = crypto.randomUUID();
                 await connection.execute(
-                  "INSERT INTO guru_mata_pelajaran (id, guru_id, mata_pelajaran_id) VALUES (?, ?, ?)",
-                  [relationId, teacherId, subjectItem.id]
+                  "INSERT INTO guru_mata_pelajaran (id, guru_id, mata_pelajaran_id, sekolah_id) VALUES (?, ?, ?, ?)",
+                  [relationId, teacherId, subjectItem.id, sekolahId]
                 );
               }
             }
@@ -5587,29 +5617,55 @@ app.post("/api/guru", authenticateTokenAndSchool, async (req, res) => {
 
       const connection = await getConnection();
 
-      // Tambahkan sekolah_id ke query INSERT
-      await connection.execute(
-        'INSERT INTO users (id, nama, email, password, role, kelas_id, nip, is_wali_kelas, sekolah_id) VALUES (?, ?, ?, ?, "guru", ?, ?, ?, ?)',
-        [
+      // Use transaction to ensure users_schools and users_roles are created together
+      await connection.beginTransaction();
+
+      try {
+        await connection.execute(
+          'INSERT INTO users (id, nama, email, password, role, kelas_id, nip, is_wali_kelas, sekolah_id) VALUES (?, ?, ?, ?, "guru", ?, ?, ?, ?)',
+          [
+            id,
+            nama,
+            email,
+            hashedPassword,
+            kelas_id || null,
+            nip || null,
+            is_wali_kelas || false,
+            req.sekolah_id,
+          ]
+        );
+
+        const createdAt = new Date()
+          .toISOString()
+          .slice(0, 19)
+          .replace("T", " ");
+        const userSchoolId = crypto.randomUUID();
+
+        await connection.execute(
+          "INSERT INTO users_schools (id, user_id, sekolah_id, is_active, created_at) VALUES (?, ?, ?, TRUE, ?)",
+          [userSchoolId, id, req.sekolah_id, createdAt]
+        );
+
+        await connection.execute(
+          "INSERT INTO users_roles (user_school_id, role, is_active, created_at) VALUES (?, ?, TRUE, ?)",
+          [userSchoolId, "guru", createdAt]
+        );
+
+        await connection.commit();
+        await connection.end();
+
+        console.log("Guru berhasil ditambahkan:", email);
+        res.json({
+          message: "Guru berhasil ditambahkan",
           id,
-          nama,
-          email,
-          hashedPassword,
-          kelas_id || null,
-          nip || null,
-          is_wali_kelas || false,
-          req.sekolah_id, // Tambahkan sekolah_id dari token
-        ]
-      );
-
-      await connection.end();
-
-      console.log("Guru berhasil ditambahkan:", email);
-      res.json({
-        message: "Guru berhasil ditambahkan",
-        id,
-        info: "Password default: password123",
-      });
+          info: "Password default: password123",
+        });
+      } catch (txErr) {
+        await connection.rollback();
+        await connection.end();
+        console.error("TRANSACTION ERROR POST GURU:", txErr.message);
+        return res.status(500).json({ error: "Gagal menambah guru" });
+      }
     } catch (hashError) {
       console.error("BCRYPT HASH ERROR:", hashError.message);
       console.error("Hash error details:", hashError);
@@ -5657,27 +5713,74 @@ app.put("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
         .json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
     }
 
-    const updateData = [
-      nama,
-      email,
-      cleanKelasId,
-      cleanNip,
-      cleanIsWaliKelas,
-      id,
-      req.sekolah_id, // Tambahkan di WHERE clause
-    ];
+    await connection.beginTransaction();
 
-    console.log("Update data:", updateData);
+    try {
+      const updateData = [
+        nama,
+        email,
+        cleanKelasId,
+        cleanNip,
+        cleanIsWaliKelas,
+        id,
+      ];
 
-    await connection.execute(
-      "UPDATE users SET nama = ?, email = ?, kelas_id = ?, nip = ?, is_wali_kelas = ? WHERE id = ? AND sekolah_id = ?",
-      updateData
-    );
+      console.log("Update data:", updateData);
 
-    await connection.end();
+      await connection.execute(
+        "UPDATE users SET nama = ?, email = ?, kelas_id = ?, nip = ?, is_wali_kelas = ? WHERE id = ? AND sekolah_id = ?",
+        [...updateData.slice(0, 5), id, req.sekolah_id]
+      );
 
-    console.log("Guru berhasil diupdate:", id);
-    res.json({ message: "Guru berhasil diupdate" });
+      // Ensure users_schools exists for this guru in this sekolah
+      const [existingUS] = await connection.execute(
+        "SELECT id FROM users_schools WHERE user_id = ? AND sekolah_id = ?",
+        [id, req.sekolah_id]
+      );
+
+      const createdAt = new Date().toISOString().slice(0, 19).replace("T", " ");
+
+      let userSchoolId;
+      if (existingUS.length === 0) {
+        userSchoolId = crypto.randomUUID();
+        await connection.execute(
+          "INSERT INTO users_schools (id, user_id, sekolah_id, is_active, created_at) VALUES (?, ?, ?, TRUE, ?)",
+          [userSchoolId, id, req.sekolah_id, createdAt]
+        );
+
+        await connection.execute(
+          "INSERT INTO users_roles (user_school_id, role, is_active, created_at) VALUES (?, ?, TRUE, ?)",
+          [userSchoolId, "guru", createdAt]
+        );
+      } else {
+        userSchoolId = existingUS[0].id;
+        // Ensure role exists
+        const [existingRoles] = await connection.execute(
+          "SELECT id FROM users_roles WHERE user_school_id = ? AND role = ?",
+          [userSchoolId, "guru"]
+        );
+        if (existingRoles.length === 0) {
+          await connection.execute(
+            "INSERT INTO users_roles (user_school_id, role, is_active, created_at) VALUES (?, ?, TRUE, ?)",
+            [userSchoolId, "guru", createdAt]
+          );
+        }
+      }
+
+      await connection.commit();
+      await connection.end();
+
+      console.log("Guru berhasil diupdate:", id);
+      res.json({ message: "Guru berhasil diupdate" });
+    } catch (txErr) {
+      await connection.rollback();
+      await connection.end();
+      console.error("TRANSACTION ERROR PUT GURU:", txErr.message);
+      if (txErr.code === "ER_DUP_ENTRY") {
+        return res.status(400).json({ error: "Email sudah terdaftar" });
+      }
+      return res.status(500).json({ error: "Gagal mengupdate guru" });
+    }
   } catch (error) {
     console.error("ERROR PUT GURU:", error.message);
     console.error("SQL Error code:", error.code);
@@ -8431,8 +8534,8 @@ app.post(
 
       const relationId = crypto.randomUUID();
       await connection.execute(
-        "INSERT INTO guru_mata_pelajaran (id, guru_id, mata_pelajaran_id) VALUES (?, ?, ?)",
-        [relationId, id, mata_pelajaran_id]
+        "INSERT INTO guru_mata_pelajaran (id, guru_id, mata_pelajaran_id, sekolah_id) VALUES (?, ?, ?, ?)",
+        [relationId, id, mata_pelajaran_id, req.sekolah_id]
       );
 
       await connection.end();
