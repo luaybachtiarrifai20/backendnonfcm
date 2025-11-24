@@ -5205,6 +5205,7 @@ app.post(
       }
 
       console.log(`Found ${importedTeachers.length} teachers to import`);
+      console.log("Import request sekolah_id:", req.sekolah_id);
 
       // Ambil data kelas dan mata pelajaran untuk mapping
       connection = await getConnection();
@@ -5285,6 +5286,26 @@ function mapExcelRowToTeacher(row, rowNumber) {
 
   console.log(`Processing row ${rowNumber}:`, normalizedRow);
 
+  // helper: for more tolerant matching, find a value for a key substring
+  function findValueByKeyContains(obj, substr) {
+    const lowerSub = substr.toLowerCase();
+    for (const k of Object.keys(obj)) {
+      if (
+        k.includes(lowerSub) &&
+        obj[k] !== undefined &&
+        obj[k] !== null &&
+        obj[k] !== ""
+      ) {
+        console.log(
+          `- Matched column '${k}' for '${substr}' with value:`,
+          obj[k]
+        );
+        return obj[k];
+      }
+    }
+    return undefined;
+  }
+
   // Mapping berbagai kemungkinan nama kolom
   const nip =
     normalizedRow["nip"] ||
@@ -5320,12 +5341,17 @@ function mapExcelRowToTeacher(row, rowNumber) {
     normalizedRow["nama kelas"] ||
     "";
 
-  // Jika data required tidak ada, skip
+  // Jika data required tidak ada, coba cari kolom alternatif kemudian skip jika tetap tidak ada
+  if (!nip) nip = findValueByKeyContains(normalizedRow, "nip") || "";
+  if (!nama) nama = findValueByKeyContains(normalizedRow, "nama") || "";
+  if (!email) email = findValueByKeyContains(normalizedRow, "email") || "";
+
   if (!nip || !nama || !email) {
     console.log(`Skipping row ${rowNumber}: Missing required data`, {
       nip,
       nama,
       email,
+      normalizedRowSample: Object.keys(normalizedRow).slice(0, 10),
     });
     return null;
   }
@@ -5353,13 +5379,14 @@ function mapExcelRowToTeacher(row, rowNumber) {
   }
 
   // Mapping lainnya
-  const noTelepon =
-    normalizedRow["no_telepon"] ||
-    normalizedRow["no telepon"] ||
-    normalizedRow["telepon"] ||
-    normalizedRow["phone"] ||
-    normalizedRow["nomor telepon"] ||
-    "";
+  // const noTelepon =
+  //   normalizedRow["no_telepon"] ||
+  //   normalizedRow["no telepon"] ||
+  //   normalizedRow["telepon"] ||
+  //   normalizedRow["phone"] ||
+  //   normalizedRow["nomor telepon"] ||
+  //   normalizedRow["No. Telepon"] ||
+  //   "";
 
   const teacher = {
     nip: nip.toString().trim(),
@@ -5367,7 +5394,7 @@ function mapExcelRowToTeacher(row, rowNumber) {
     email: email.toString().trim(),
     mata_pelajaran_nama: mataPelajaranNama.toString().trim(),
     kelas_nama: kelasNama.toString().trim(),
-    no_telepon: noTelepon.toString().trim(),
+    // no_telepon: noTelepon.toString().trim(),
     is_wali_kelas: isWaliKelas,
     row_number: rowNumber,
   };
@@ -5393,14 +5420,24 @@ async function processTeacherImport(
   try {
     connection = await getConnection();
 
+    console.log(
+      `Starting processTeacherImport for sekolah_id=${sekolahId}, totalRows=${importedTeachers.length}`
+    );
+
     for (const teacherData of importedTeachers) {
       try {
         // Validasi data required
         if (!teacherData.nip || !teacherData.nama || !teacherData.email) {
           results.failed++;
-          results.errors.push(
-            `Baris ${teacherData.row_number}: Data required tidak lengkap`
-          );
+          const msg = `Baris ${teacherData.row_number}: Data required tidak lengkap`;
+          results.errors.push(msg);
+          console.warn("Skipping import - missing required fields:", {
+            row: teacherData.row_number,
+            nip: teacherData.nip,
+            nama: teacherData.nama,
+            email: teacherData.email,
+            teacherData,
+          });
           continue;
         }
 
@@ -5412,9 +5449,14 @@ async function processTeacherImport(
 
         if (existingNIP.length > 0) {
           results.failed++;
-          results.errors.push(
-            `Baris ${teacherData.row_number}: NIP '${teacherData.nip}' sudah terdaftar`
-          );
+          const msg = `Baris ${teacherData.row_number}: NIP '${teacherData.nip}' sudah terdaftar`;
+          results.errors.push(msg);
+          console.warn("Duplicate NIP detected, skipping row", {
+            row: teacherData.row_number,
+            nip: teacherData.nip,
+            existing: existingNIP,
+            teacherData,
+          });
           continue;
         }
 
@@ -5426,9 +5468,14 @@ async function processTeacherImport(
 
         if (existingEmail.length > 0) {
           results.failed++;
-          results.errors.push(
-            `Baris ${teacherData.row_number}: Email '${teacherData.email}' sudah terdaftar`
-          );
+          const msg = `Baris ${teacherData.row_number}: Email '${teacherData.email}' sudah terdaftar`;
+          results.errors.push(msg);
+          console.warn("Duplicate email detected, skipping row", {
+            row: teacherData.row_number,
+            email: teacherData.email,
+            existing: existingEmail,
+            teacherData,
+          });
           continue;
         }
 
@@ -5442,9 +5489,13 @@ async function processTeacherImport(
 
           if (!classItem) {
             results.failed++;
-            results.errors.push(
-              `Baris ${teacherData.row_number}: Kelas '${teacherData.kelas_nama}' tidak ditemukan`
-            );
+            const msg = `Baris ${teacherData.row_number}: Kelas '${teacherData.kelas_nama}' tidak ditemukan`;
+            results.errors.push(msg);
+            console.warn("Class not found for teacher, skipping row", {
+              row: teacherData.row_number,
+              kelas_nama: teacherData.kelas_nama,
+              teacherData,
+            });
             continue;
           }
           kelasId = classItem.id;
@@ -5459,20 +5510,61 @@ async function processTeacherImport(
           const hashedPassword = await bcrypt.hash(password, 10);
 
           // Insert guru with sekolah context and create access rows
-          await connection.execute(
-            "INSERT INTO users (id, nama, email, password, role, nip, kelas_id, is_wali_kelas, no_telepon, sekolah_id) VALUES (?, ?, ?, ?, 'guru', ?, ?, ?, ?, ?)",
-            [
+          // Detect if users table has 'no_telepon' column to avoid SQL errors on different schemas
+          try {
+            const [colCheck] = await connection.execute(
+              "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'users' AND COLUMN_NAME = 'no_telepon'",
+              [dbConfig.database]
+            );
+
+            const hasNoTelepon = Array.isArray(colCheck) && colCheck.length > 0;
+
+            const userColumns = [
+              "id",
+              "nama",
+              "email",
+              "password",
+              "role",
+              "nip",
+              "kelas_id",
+              "is_wali_kelas",
+            ];
+
+            const userValues = [
               teacherId,
               teacherData.nama,
               teacherData.email,
               hashedPassword,
+              "guru",
               teacherData.nip,
               kelasId,
               teacherData.is_wali_kelas,
-              teacherData.no_telepon || "",
-              sekolahId,
-            ]
-          );
+            ];
+
+            // if (hasNoTelepon) {
+            //   userColumns.push("no_telepon");
+            //   userValues.push(teacherData.no_telepon || "");
+            // }
+
+            userColumns.push("sekolah_id");
+            userValues.push(sekolahId);
+
+            const placeholders = userColumns.map(() => "?").join(", ");
+            const insertSql = `INSERT INTO users (${userColumns.join(
+              ", "
+            )}) VALUES (${placeholders})`;
+
+            if (process.env.NODE_ENV !== 'production')
+              console.log("User insert SQL:", insertSql, "values:", userValues);
+
+            await connection.execute(insertSql, userValues);
+          } catch (insertDetectError) {
+            console.error(
+              "Error detecting users schema or inserting user:",
+              insertDetectError
+            );
+            throw insertDetectError;
+          }
 
           // create users_schools and users_roles for imported guru
           try {
@@ -5490,11 +5582,19 @@ async function processTeacherImport(
               "INSERT INTO users_roles (user_school_id, role, is_active, created_at) VALUES (?, ?, TRUE, ?)",
               [userSchoolId, "guru", createdAt]
             );
+            console.log(
+              `Inserted users_schools (${userSchoolId}) and users_roles for teacher ${teacherData.email}`
+            );
           } catch (e) {
             console.error(
               "Failed to create users_schools/users_roles for imported guru:",
-              e.message
+              e && e.message ? e.message : e
             );
+            console.error("users_schools/users_roles payload:", {
+              teacherEmail: teacherData.email,
+              teacherNip: teacherData.nip,
+              sekolahId: sekolahId,
+            });
             throw e;
           }
 
@@ -5515,16 +5615,34 @@ async function processTeacherImport(
                   "INSERT INTO guru_mata_pelajaran (id, guru_id, mata_pelajaran_id, sekolah_id) VALUES (?, ?, ?, ?)",
                   [relationId, teacherId, subjectItem.id, sekolahId]
                 );
+                try {
+                  // safe debug log for Node runtime
+                  console.log(
+                    `Added subject mapping for teacher ${teacherData.email}: ${subjectItem.nama}`
+                  );
+                } catch (e) {
+                  // ignore
+                }
               }
             }
           }
 
           // Commit transaction
           await connection.commit();
+          console.log(
+            `Inserted teacher: id=${teacherId}, email=${teacherData.email}, kelas_id=${kelasId}, sekolah_id=${sekolahId}`
+          );
           results.success++;
         } catch (transactionError) {
           // Rollback jika ada error
           await connection.rollback();
+          console.error(
+            "Transaction failed for row",
+            teacherData.row_number,
+            transactionError && transactionError.message
+              ? transactionError.message
+              : transactionError
+          );
           throw transactionError;
         }
       } catch (teacherError) {
@@ -5534,7 +5652,10 @@ async function processTeacherImport(
         );
         console.error(
           `Error importing teacher ${teacherData.nip}:`,
-          teacherError.message
+          teacherError && teacherError.message
+            ? teacherError.message
+            : teacherError,
+          { teacherData }
         );
       }
     }
