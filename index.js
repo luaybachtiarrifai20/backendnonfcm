@@ -2755,7 +2755,11 @@ app.post(
       await connection.end();
 
       // Proses import
-      const result = await processClassImport(importedClasses, teacherList);
+      const result = await processClassImport(
+        importedClasses,
+        teacherList,
+        req.sekolah_id
+      );
 
       console.log("Import completed:", result);
       res.json({
@@ -2869,7 +2873,7 @@ function mapExcelRowToClass(row, rowNumber) {
 }
 
 // Fungsi processClassImport
-async function processClassImport(importedClasses, teacherList) {
+async function processClassImport(importedClasses, teacherList, sekolahId) {
   let connection;
   const results = {
     success: 0,
@@ -2932,8 +2936,14 @@ async function processClassImport(importedClasses, teacherList) {
 
           // Insert kelas
           await connection.execute(
-            "INSERT INTO kelas (id, nama, grade_level, wali_kelas_id) VALUES (?, ?, ?, ?)",
-            [classId, classData.nama, classData.grade_level, waliKelasId]
+            "INSERT INTO kelas (id, nama, grade_level, wali_kelas_id, sekolah_id) VALUES (?, ?, ?, ?, ?)",
+            [
+              classId,
+              classData.nama,
+              classData.grade_level,
+              waliKelasId,
+              sekolahId,
+            ]
           );
 
           // Commit transaction
