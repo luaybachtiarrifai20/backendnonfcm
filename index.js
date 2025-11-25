@@ -2275,6 +2275,56 @@ app.delete("/api/kelas/:id", authenticateTokenAndSchool, async (req, res) => {
   }
 });
 
+// Endpoint untuk download template kelas
+app.get("/api/kelas/template", authenticateTokenAndSchool, async (req, res) => {
+  try {
+    const XLSX = require("xlsx");
+
+    // Data contoh untuk template kelas
+    const templateData = [
+      {
+        nama: "X IPA 1",
+        grade_level: "10",
+        wali_kelas_nama: "Budi Santoso",
+      },
+      {
+        nama: "X IPA 2",
+        grade_level: "10",
+        wali_kelas_nama: "Siti Rahayu",
+      },
+      {
+        nama: "XI IPA 1",
+        grade_level: "11",
+        wali_kelas_nama: "Ahmad Wijaya",
+      },
+    ];
+
+    // Buat workbook
+    const workbook = XLSX.utils.book_new();
+    const worksheet = XLSX.utils.json_to_sheet(templateData);
+
+    // Tambahkan worksheet ke workbook
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Template Kelas");
+
+    // Set header
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="template_import_kelas.xlsx"'
+    );
+
+    // Tulis ke response
+    const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+    res.send(buffer);
+  } catch (error) {
+    console.error("ERROR DOWNLOAD TEMPLATE KELAS:", error.message);
+    res.status(500).json({ error: "Gagal mendownload template kelas" });
+  }
+});
+
 // Get Kelas by ID
 app.get("/api/kelas/:id", authenticateTokenAndSchool, async (req, res) => {
   try {
@@ -2663,55 +2713,7 @@ app.get(
   }
 );
 
-// Endpoint untuk download template kelas
-app.get("/api/kelas/template", authenticateTokenAndSchool, async (req, res) => {
-  try {
-    const XLSX = require("xlsx");
 
-    // Data contoh untuk template kelas
-    const templateData = [
-      {
-        nama: "X IPA 1",
-        grade_level: "10",
-        wali_kelas_nama: "Budi Santoso",
-      },
-      {
-        nama: "X IPA 2",
-        grade_level: "10",
-        wali_kelas_nama: "Siti Rahayu",
-      },
-      {
-        nama: "XI IPA 1",
-        grade_level: "11",
-        wali_kelas_nama: "Ahmad Wijaya",
-      },
-    ];
-
-    // Buat workbook
-    const workbook = XLSX.utils.book_new();
-    const worksheet = XLSX.utils.json_to_sheet(templateData);
-
-    // Tambahkan worksheet ke workbook
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Template Kelas");
-
-    // Set header
-    res.setHeader(
-      "Content-Type",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    );
-    res.setHeader(
-      "Content-Disposition",
-      'attachment; filename="template_import_kelas.xlsx"'
-    );
-
-    // Tulis ke response
-    const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
-    res.send(buffer);
-  } catch (error) {
-    console.error("ERROR DOWNLOAD TEMPLATE KELAS:", error.message);
-    res.status(500).json({ error: "Gagal mendownload template kelas" });
-  }
-});
 
 // Import kelas dari Excel
 app.post(
