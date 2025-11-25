@@ -2873,7 +2873,7 @@ function mapExcelRowToClass(row, rowNumber) {
 }
 
 // Fungsi processClassImport
-async function processClassImport(importedClasses, teacherList, sekolahId) {
+async function processClassImport(importedClasses, teacherList, schoolId) {
   let connection;
   const results = {
     success: 0,
@@ -2942,7 +2942,7 @@ async function processClassImport(importedClasses, teacherList, sekolahId) {
               classData.nama,
               classData.grade_level,
               waliKelasId,
-              sekolahId,
+              schoolId,
             ]
           );
 
@@ -3246,7 +3246,7 @@ function mapExcelRowToStudent(row, rowNumber) {
 }
 
 // Fungsi processStudentImport (tetap sama seperti sebelumnya)
-async function processStudentImport(importedStudents, classList, sekolahId) {
+async function processStudentImport(importedStudents, classList, schoolId) {
   let connection;
   const results = {
     success: 0,
@@ -3285,7 +3285,7 @@ async function processStudentImport(importedStudents, classList, sekolahId) {
         // Cek NIS duplikat untuk sekolah ini
         const [existingNIS] = await connection.execute(
           "SELECT id FROM siswa WHERE nis = ? AND sekolah_id = ?",
-          [studentData.nis, sekolahId]
+          [studentData.nis, schoolId]
         );
 
         if (existingNIS.length > 0) {
@@ -3321,7 +3321,7 @@ async function processStudentImport(importedStudents, classList, sekolahId) {
               studentData.nama_wali,
               studentData.email_wali,
               studentData.no_telepon,
-              sekolahId,
+              schoolId,
               createdAt,
               updatedAt,
             ]
@@ -3348,7 +3348,7 @@ async function processStudentImport(importedStudents, classList, sekolahId) {
                   studentData.email_wali,
                   hashedPassword,
                   studentId,
-                  sekolahId,
+                  schoolId,
                 ]
               );
 
@@ -3357,7 +3357,7 @@ async function processStudentImport(importedStudents, classList, sekolahId) {
                 const userSchoolId = crypto.randomUUID();
                 await connection.execute(
                   "INSERT INTO users_schools (id, user_id, sekolah_id, is_active, created_at) VALUES (?, ?, ?, TRUE, ?)",
-                  [userSchoolId, waliId, sekolahId, createdAt]
+                  [userSchoolId, waliId, schoolId, createdAt]
                 );
 
                 await connection.execute(
@@ -5420,7 +5420,7 @@ async function processTeacherImport(
   importedTeachers,
   classList,
   subjectList,
-  sekolahId
+  schoolId
 ) {
   let connection;
   const results = {
@@ -5433,7 +5433,7 @@ async function processTeacherImport(
     connection = await getConnection();
 
     console.log(
-      `Starting processTeacherImport for sekolah_id=${sekolahId}, totalRows=${importedTeachers.length}`
+      `Starting processTeacherImport for sekolah_id=${schoolId}, totalRows=${importedTeachers.length}`
     );
 
     for (const teacherData of importedTeachers) {
@@ -5559,7 +5559,7 @@ async function processTeacherImport(
             // }
 
             userColumns.push("sekolah_id");
-            userValues.push(sekolahId);
+            userValues.push(schoolId);
 
             const placeholders = userColumns.map(() => "?").join(", ");
             const insertSql = `INSERT INTO users (${userColumns.join(
@@ -5587,7 +5587,7 @@ async function processTeacherImport(
             const userSchoolId = crypto.randomUUID();
             await connection.execute(
               "INSERT INTO users_schools (id, user_id, sekolah_id, is_active, created_at) VALUES (?, ?, ?, TRUE, ?)",
-              [userSchoolId, teacherId, sekolahId, createdAt]
+              [userSchoolId, teacherId, schoolId, createdAt]
             );
 
             await connection.execute(
@@ -5605,7 +5605,7 @@ async function processTeacherImport(
             console.error("users_schools/users_roles payload:", {
               teacherEmail: teacherData.email,
               teacherNip: teacherData.nip,
-              sekolahId: sekolahId,
+              schoolId: schoolId,
             });
             throw e;
           }
@@ -5625,7 +5625,7 @@ async function processTeacherImport(
                 const relationId = crypto.randomUUID();
                 await connection.execute(
                   "INSERT INTO guru_mata_pelajaran (id, guru_id, mata_pelajaran_id, sekolah_id) VALUES (?, ?, ?, ?)",
-                  [relationId, teacherId, subjectItem.id, sekolahId]
+                  [relationId, teacherId, subjectItem.id, schoolId]
                 );
                 try {
                   // safe debug log for Node runtime
@@ -5642,7 +5642,7 @@ async function processTeacherImport(
           // Commit transaction
           await connection.commit();
           console.log(
-            `Inserted teacher: id=${teacherId}, email=${teacherData.email}, kelas_id=${kelasId}, sekolah_id=${sekolahId}`
+            `Inserted teacher: id=${teacherId}, email=${teacherData.email}, kelas_id=${kelasId}, sekolah_id=${schoolId}`
           );
           results.success++;
         } catch (transactionError) {
