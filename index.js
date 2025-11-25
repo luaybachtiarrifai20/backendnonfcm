@@ -4634,12 +4634,13 @@ function getClassNames(subject) {
 // Import mata pelajaran dari Excel
 app.post(
   "/api/mata-pelajaran/import",
-  authenticateToken,
+  authenticateTokenAndSchool,
   excelUploadMiddleware,
   async (req, res) => {
     let connection;
     try {
       console.log("Import mata pelajaran dari Excel (memory storage)");
+      console.log("User's sekolah_id:", req.sekolah_id);
 
       if (!req.file) {
         return res.status(400).json({ error: "Tidak ada file yang diupload" });
@@ -4666,15 +4667,20 @@ app.post(
 
       console.log(`Found ${importedSubjects.length} subjects to import`);
 
-      // Ambil data kelas untuk mapping
+      // Ambil data kelas untuk mapping (hanya kelas dari sekolah yang sama)
       connection = await getConnection();
       const [classList] = await connection.execute(
-        "SELECT id, nama FROM kelas"
+        "SELECT id, nama FROM kelas WHERE sekolah_id = ?",
+        [req.sekolah_id]
       );
       await connection.end();
 
-      // Proses import
-      const result = await processSubjectImport(importedSubjects, classList);
+      // Proses import dengan sekolah_id dari user yang login
+      const result = await processSubjectImport(
+        importedSubjects,
+        classList,
+        req.sekolah_id
+      );
 
       console.log("Import completed:", result);
       res.json({
@@ -4791,7 +4797,7 @@ function mapExcelRowToSubject(row, rowNumber) {
 }
 
 // Fungsi processSubjectImport
-async function processSubjectImport(importedSubjects, classList) {
+async function processSubjectImport(importedSubjects, classList, sekolahId) {
   let connection;
   const results = {
     success: 0,
@@ -4813,16 +4819,16 @@ async function processSubjectImport(importedSubjects, classList) {
           continue;
         }
 
-        // Cek kode duplikat
+        // Cek kode duplikat (hanya dalam sekolah yang sama)
         const [existingKode] = await connection.execute(
-          "SELECT id FROM mata_pelajaran WHERE kode = ?",
-          [subjectData.kode]
+          "SELECT id FROM mata_pelajaran WHERE kode = ? AND sekolah_id = ?",
+          [subjectData.kode, sekolahId]
         );
 
         if (existingKode.length > 0) {
           results.failed++;
           results.errors.push(
-            `Baris ${subjectData.row_number}: Kode '${subjectData.kode}' sudah terdaftar`
+            `Baris ${subjectData.row_number}: Kode '${subjectData.kode}' sudah terdaftar di sekolah ini`
           );
           continue;
         }
@@ -4838,14 +4844,15 @@ async function processSubjectImport(importedSubjects, classList) {
             .replace("T", " ");
           const updatedAt = createdAt;
 
-          // Insert mata pelajaran
+          // Insert mata pelajaran dengan sekolah_id
           await connection.execute(
-            "INSERT INTO mata_pelajaran (id, kode, nama, deskripsi, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO mata_pelajaran (id, kode, nama, deskripsi, sekolah_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
               subjectId,
               subjectData.kode,
               subjectData.nama,
               subjectData.deskripsi,
+              sekolahId,
               createdAt,
               updatedAt,
             ]
