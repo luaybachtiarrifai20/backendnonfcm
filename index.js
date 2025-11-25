@@ -4365,16 +4365,63 @@ app.post("/api/export-subjects", async (req, res) => {
     // Create new workbook
     const workbook = XLSX.utils.book_new();
 
+    // Fetch kelas_names for subjects that don't have it
+    const connection = await getConnection();
+    
+    console.log(`Processing ${subjects.length} subjects for export...`);
+    
+    const enrichedSubjects = await Promise.all(
+      subjects.map(async (subject, index) => {
+        let kelasNames = getClassNames(subject);
+        
+        console.log(`Subject ${index + 1}: ID=${subject.id}, Kode=${subject.kode}, Initial kelas_names="${kelasNames}"`);
+        
+        // If kelas_names is empty, fetch from mata_pelajaran_kelas table
+        if (!kelasNames && subject.id) {
+          try {
+            console.log(`  Fetching kelas from database for subject ID: ${subject.id}`);
+            const [kelasData] = await connection.execute(
+              `SELECT GROUP_CONCAT(k.nama ORDER BY k.nama) as kelas_names
+               FROM mata_pelajaran_kelas mpk
+               JOIN kelas k ON mpk.kelas_id = k.id
+               WHERE mpk.mata_pelajaran_id = ?`,
+              [subject.id]
+            );
+            
+            if (kelasData && kelasData.length > 0 && kelasData[0].kelas_names) {
+              kelasNames = kelasData[0].kelas_names;
+              console.log(`  ✅ Found kelas from database: "${kelasNames}"`);
+            } else {
+              console.log(`  ⚠️ No kelas found in database for subject ID: ${subject.id}`);
+            }
+          } catch (err) {
+            console.error(`  ❌ Error fetching kelas for subject ${subject.id}:`, err.message);
+          }
+        } else if (kelasNames) {
+          console.log(`  ℹ️ Using existing kelas_names: "${kelasNames}"`);
+        } else {
+          console.log(`  ⚠️ No subject ID provided, cannot fetch kelas from database`);
+        }
+        
+        return {
+          ...subject,
+          kelas_names: kelasNames
+        };
+      })
+    );
+    
+    await connection.end();
+
     // Prepare data for Excel
     const excelData = [
       // Header row
       ["Kode*", "Nama*", "Deskripsi", "Kelas", "Status"],
       // Data rows
-      ...subjects.map((subject) => [
+      ...enrichedSubjects.map((subject) => [
         subject.kode || "",
         subject.nama || "",
         subject.deskripsi || "",
-        getClassNames(subject),
+        subject.kelas_names || "",
         "Active",
       ]),
     ];
