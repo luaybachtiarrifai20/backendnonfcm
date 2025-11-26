@@ -2368,20 +2368,23 @@ app.get("/api/guru", authenticateTokenAndSchool, async (req, res) => {
 
     const connection = await getConnection();
 
-    // Build filter conditions
-    const conditions = ["u.role = 'guru'", "u.sekolah_id = ?"];
+    // Build filter conditions for new guru table structure
+    const conditions = ["g.sekolah_id = ?"];
     const params = [req.sekolah_id];
 
     if (search) {
-      conditions.push("(u.nama LIKE ? OR u.email LIKE ? OR u.nip LIKE ?)");
+      conditions.push("(g.nama LIKE ? OR u.email LIKE ? OR g.nip LIKE ?)");
       params.push(`%${search}%`, `%${search}%`, `%${search}%`);
     }
     if (kelas_id) {
-      conditions.push("u.kelas_id = ?");
+      // Check if teacher teaches this class via guru_kelas junction table
+      conditions.push(
+        "EXISTS (SELECT 1 FROM guru_kelas gk WHERE gk.guru_id = g.id AND gk.kelas_id = ?)"
+      );
       params.push(kelas_id);
     }
     if (jenis_kelamin) {
-      conditions.push("u.jenis_kelamin = ?");
+      conditions.push("g.jenis_kelamin = ?");
       params.push(jenis_kelamin);
     }
 
@@ -2397,22 +2400,45 @@ app.get("/api/guru", authenticateTokenAndSchool, async (req, res) => {
     // Count total items
     const countQuery = `
       SELECT COUNT(*) as total
-      FROM users u 
+      FROM guru g
+      INNER JOIN users u ON g.user_id = u.id
       ${whereClause}
     `;
     const [countResult] = await connection.execute(countQuery, params);
     const totalItems = countResult[0].total;
 
-    // Get paginated data
+    // Get paginated data with aggregated subjects and classes
     const dataQuery = `
       SELECT 
-        u.*, 
-        k.nama as kelas_nama,
-        (SELECT COUNT(*) FROM kelas WHERE wali_kelas_id = u.id) as is_wali_kelas
-      FROM users u 
-      LEFT JOIN kelas k ON u.kelas_id = k.id 
+        g.id,
+        g.user_id,
+        g.nama,
+        g.nip,
+        g.jenis_kelamin,
+        g.wali_kelas_id,
+        g.status_kepegawaian,
+        g.sekolah_id,
+        g.created_at,
+        g.updated_at,
+        u.email,
+        wk.nama as wali_kelas_nama,
+        GROUP_CONCAT(DISTINCT mp.id) as mata_pelajaran_ids,
+        GROUP_CONCAT(DISTINCT mp.nama) as mata_pelajaran_names,
+        GROUP_CONCAT(DISTINCT k.id) as kelas_ids,
+        GROUP_CONCAT(DISTINCT k.nama) as kelas_names,
+        CASE WHEN g.wali_kelas_id IS NOT NULL THEN 1 ELSE 0 END as is_wali_kelas
+      FROM guru g
+      INNER JOIN users u ON g.user_id = u.id
+      LEFT JOIN kelas wk ON g.wali_kelas_id = wk.id
+      LEFT JOIN guru_mata_pelajaran gmp ON g.id = gmp.guru_id
+      LEFT JOIN mata_pelajaran mp ON gmp.mata_pelajaran_id = mp.id
+      LEFT JOIN guru_kelas gk ON g.id = gk.guru_id
+      LEFT JOIN kelas k ON gk.kelas_id = k.id
       ${whereClause}
-      ORDER BY u.nama ASC
+      GROUP BY g.id, g.user_id, g.nama, g.nip, g.jenis_kelamin, g.wali_kelas_id, 
+               g.status_kepegawaian, g.sekolah_id, g.created_at, g.updated_at,
+               u.email, wk.nama
+      ORDER BY g.nama ASC
       ${limitClause}
     `;
     const [guru] = await connection.execute(dataQuery, params);
@@ -2483,15 +2509,16 @@ app.get(
 
 // Delete Guru
 app.delete("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
+  let connection;
   try {
-    const { id } = req.params;
+    const { id } = req.params; // This is guru.id
     console.log("Delete guru:", id);
 
-    const connection = await getConnection();
+    connection = await getConnection();
 
-    // Cek apakah guru termasuk dalam sekolah yang sama
+    // Check if guru exists and belongs to the same school
     const [existingGuru] = await connection.execute(
-      "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+      "SELECT g.id, g.user_id, g.wali_kelas_id FROM guru g WHERE g.id = ? AND g.sekolah_id = ?",
       [id, req.sekolah_id]
     );
 
@@ -2502,33 +2529,661 @@ app.delete("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
         .json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
     }
 
-    // Cek jika guru adalah wali kelas
-    const [waliKelas] = await connection.execute(
-      "SELECT id FROM kelas WHERE wali_kelas_id = ?",
-      [id]
-    );
+    const userId = existingGuru[0].user_id;
+    const waliKelasId = existingGuru[0].wali_kelas_id;
 
-    if (waliKelas.length > 0) {
+    // Check if guru is assigned as homeroom teacher
+    if (waliKelasId) {
       await connection.end();
       return res.status(400).json({
         error: "Guru tidak dapat dihapus karena masih menjadi wali kelas",
       });
     }
 
+    // Delete guru record (CASCADE will delete from guru_mata_pelajaran and guru_kelas)
     await connection.execute(
-      "DELETE FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
-      [id, req.sekolah_id] // Tambahkan sekolah_id di WHERE
+      "DELETE FROM guru WHERE id = ? AND sekolah_id = ?",
+      [id, req.sekolah_id]
     );
+
+    // Delete user record (if you want to also delete the user account)
+    // Optional: you might want to keep the user account but just remove guru role
+    await connection.execute("DELETE FROM users WHERE id = ?", [userId]);
+
     await connection.end();
 
-    console.log("Guru berhasil dihapus:", id);
-    res.json({ message: "Guru berhasil dihapus" });
+    console.log("✅ Guru berhasil dihapus:", id);
+    res.json({
+      success: true,
+      message: "Guru berhasil dihapus",
+    });
   } catch (error) {
+    if (connection) await connection.end();
+
     console.error("ERROR DELETE GURU:", error.message);
-    console.error("SQL Error code:", error.code);
-    res.status(500).json({ error: "Gagal menghapus guru" });
+    res.status(500).json({ error: "Gagal menghapus guru: " + error.message });
   }
 });
+
+// Export Teachers to Excel
+app.post("/api/export-teachers", authenticateTokenAndSchool, async (req, res) => {
+  let connection;
+  try {
+    const { teachers } = req.body;
+
+    if (!teachers || !Array.isArray(teachers)) {
+      return res.status(400).json({
+        success: false,
+        message: "Data guru tidak valid",
+      });
+    }
+
+    console.log(`Processing ${teachers.length} teachers for export...`);
+
+    // Create new workbook
+    const workbook = XLSX.utils.book_new();
+
+    // Fetch complete data for teachers if needed
+    connection = await getConnection();
+
+    const enrichedTeachers = await Promise.all(
+      teachers.map(async (teacher, index) => {
+        // If teacher already has complete data, use it
+        let subjectNames = teacher.mata_pelajaran_names || "";
+        let classNames = teacher.kelas_names || "";
+
+        // If data is missing, fetch from database
+        if ((!subjectNames || !classNames) && teacher.id) {
+          try {
+            const [teacherData] = await connection.execute(
+              `SELECT 
+                GROUP_CONCAT(DISTINCT mp.nama) as mata_pelajaran_names,
+                GROUP_CONCAT(DISTINCT k.nama) as kelas_names
+               FROM guru g
+               LEFT JOIN guru_mata_pelajaran gmp ON g.id = gmp.guru_id
+               LEFT JOIN mata_pelajaran mp ON gmp.mata_pelajaran_id = mp.id
+               LEFT JOIN guru_kelas gk ON g.id = gk.guru_id
+               LEFT JOIN kelas k ON gk.kelas_id = k.id
+               WHERE g.id = ?
+               GROUP BY g.id`,
+              [teacher.id]
+            );
+
+            if (teacherData && teacherData.length > 0) {
+              subjectNames = teacherData[0].mata_pelajaran_names || "";
+              classNames = teacherData[0].kelas_names || "";
+            }
+          } catch (err) {
+            console.error(`Error fetching data for teacher ${teacher.id}:`, err);
+          }
+        }
+
+        return {
+          ...teacher,
+          mata_pelajaran_names: subjectNames,
+          kelas_names: classNames,
+        };
+      })
+    );
+
+    await connection.end();
+
+    // Prepare data for Excel
+    const excelData = [
+      // Header row
+      [
+        "Nama*",
+        "Email*",
+        "NIP",
+        "Jenis Kelamin*",
+        "Mata Pelajaran",
+        "Kelas",
+        "Wali Kelas",
+        "Status Kepegawaian",
+      ],
+      // Data rows
+      ...enrichedTeachers.map((teacher) => [
+        teacher.nama || "",
+        teacher.email || "",
+        teacher.nip || "",
+        teacher.jenis_kelamin === "L"
+          ? "Laki-laki"
+          : teacher.jenis_kelamin === "P"
+          ? "Perempuan"
+          : "",
+        teacher.mata_pelajaran_names || "",
+        teacher.kelas_names || "",
+        teacher.wali_kelas_nama || "",
+        teacher.status_kepegawaian || "",
+      ]),
+    ];
+
+    // Create worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(excelData);
+
+    // Set column widths
+    if (!worksheet["!cols"]) worksheet["!cols"] = [];
+    worksheet["!cols"] = [
+      { width: 25 }, // Nama
+      { width: 30 }, // Email
+      { width: 18 }, // NIP
+      { width: 15 }, // Jenis Kelamin
+      { width: 30 }, // Mata Pelajaran
+      { width: 25 }, // Kelas
+      { width: 15 }, // Wali Kelas
+      { width: 20 }, // Status Kepegawaian
+    ];
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Data Guru");
+
+    // Generate filename
+    const filename = `Data_Guru_${Date.now()}.xlsx`;
+    const filePath = path.join(__dirname, "../temp", filename);
+
+    // Ensure temp directory exists
+    if (!fs.existsSync(path.join(__dirname, "../temp"))) {
+      fs.mkdirSync(path.join(__dirname, "../temp"), { recursive: true });
+    }
+
+    // Write file
+    XLSX.writeFile(workbook, filePath);
+
+    // Send file as response
+    res.download(filePath, filename, (err) => {
+      if (err) {
+        console.error("Error downloading file:", err);
+        res.status(500).json({
+          success: false,
+          message: "Gagal mengunduh file",
+        });
+      }
+
+      // Clean up temporary file after download
+      setTimeout(() => {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      }, 5000);
+    });
+  } catch (error) {
+    if (connection) await connection.end();
+    console.error("Export teachers error:", error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal mengexport data: ${error.message}`,
+    });
+  }
+});
+
+// Download Template Excel untuk Guru
+app.get("/api/download-teacher-template", async (req, res) => {
+  try {
+    // Create new workbook
+    const workbook = XLSX.utils.book_new();
+
+    // Prepare template data
+    const templateData = [
+      // Header row
+      [
+        "Nama*",
+        "Email*",
+        "NIP",
+        "Jenis Kelamin*",
+        "Mata Pelajaran",
+        "Kelas",
+        "Wali Kelas",
+        "Status Kepegawaian",
+      ],
+      // Example data
+      [
+        "Budi Santoso",
+        "budi@school.com",
+        "198501012010011001",
+        "Laki-laki",
+        "Matematika,IPA",
+        "7A,7B",
+        "7A",
+        "tetap",
+      ],
+      [
+        "Siti Aminah",
+        "siti@school.com",
+        "198705022011012002",
+        "Perempuan",
+        "Bahasa Indonesia",
+        "8A,8B,8C",
+        "",
+        "tetap",
+      ],
+      [
+        "Ahmad Hidayat",
+        "ahmad@school.com",
+        "",
+        "Laki-laki",
+        "Bahasa Inggris,PKN",
+        "9A",
+        "",
+        "tidak_tetap",
+      ],
+      // Empty row
+      [],
+      // Notes
+      ["* Wajib diisi"],
+      ["Jenis Kelamin: Laki-laki atau Perempuan"],
+      ["Mata Pelajaran: Pisahkan dengan koma jika multiple (contoh: Matematika,IPA)"],
+      ["Kelas: Pisahkan dengan koma jika multiple (contoh: 7A,7B,8A)"],
+      ["Wali Kelas: Isi nama kelas jika guru menjadi wali kelas (contoh: 7A)"],
+      [
+        "Status Kepegawaian: tetap atau tidak_tetap (kosongkan jika tidak ada)",
+      ],
+    ];
+
+    // Create worksheet
+    const worksheet = XLSX.utils.aoa_to_sheet(templateData);
+
+    // Set column widths
+    if (!worksheet["!cols"]) worksheet["!cols"] = [];
+    worksheet["!cols"] = [
+      { width: 25 }, // Nama
+      { width: 30 }, // Email
+      { width: 18 }, // NIP
+      { width: 15 }, // Jenis Kelamin
+      { width: 30 }, // Mata Pelajaran
+      { width: 25 }, // Kelas
+      { width: 15 }, // Wali Kelas
+      { width: 20 }, // Status Kepegawaian
+    ];
+
+    // Add worksheet to workbook
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Template Guru");
+
+    // Generate filename
+    const filename = "Template_Import_Guru.xlsx";
+    const filePath = path.join(__dirname, "../temp", filename);
+
+    // Ensure temp directory exists
+    if (!fs.existsSync(path.join(__dirname, "../temp"))) {
+      fs.mkdirSync(path.join(__dirname, "../temp"), { recursive: true });
+    }
+
+    // Write file
+    XLSX.writeFile(workbook, filePath);
+
+    // Send file as response
+    res.download(filePath, filename, (err) => {
+      if (err) {
+        console.error("Error downloading template:", err);
+        res.status(500).json({
+          success: false,
+          message: "Gagal mengunduh template",
+        });
+      }
+
+      // Clean up temporary file after download
+      setTimeout(() => {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      }, 5000);
+    });
+  } catch (error) {
+    console.error("Download template error:", error);
+    res.status(500).json({
+      success: false,
+      message: `Gagal mengunduh template: ${error.message}`,
+    });
+  }
+});
+
+// Import Guru dari Excel
+app.post(
+  "/api/import-teachers",
+  authenticateTokenAndSchool,
+  excelUploadMiddleware,
+  async (req, res) => {
+    let connection;
+    try {
+      console.log("Import guru dari Excel (memory storage)");
+      console.log("User's sekolah_id:", req.sekolah_id);
+
+      if (!req.file) {
+        return res.status(400).json({ error: "Tidak ada file yang diupload" });
+      }
+
+      console.log("File received in memory:", {
+        originalname: req.file.originalname,
+        size: req.file.size,
+        mimetype: req.file.mimetype,
+        bufferLength: req.file.buffer.length,
+      });
+
+      // Read Excel file from buffer
+      const importedTeachers = await readExcelTeachersFromBuffer(
+        req.file.buffer
+      );
+
+      if (importedTeachers.length === 0) {
+        return res.status(400).json({
+          error: "Tidak ada data guru yang valid ditemukan dalam file",
+        });
+      }
+
+      console.log(`Found ${importedTeachers.length} teachers to import`);
+
+      // Get reference data (subjects and classes from this school)
+      connection = await getConnection();
+      
+      const [subjectList] = await connection.execute(
+        "SELECT id, nama FROM mata_pelajaran WHERE sekolah_id = ?",
+        [req.sekolah_id]
+      );
+      
+      const [classList] = await connection.execute(
+        "SELECT id, nama FROM kelas WHERE sekolah_id = ?",
+        [req.sekolah_id]
+      );
+      
+      await connection.end();
+
+      // Process import with sekolah_id
+      const result = await processTeacherImport(
+        importedTeachers,
+        subjectList,
+        classList,
+        req.sekolah_id
+      );
+
+      console.log("Import completed:", result);
+      res.json({
+        message: "Import selesai",
+        ...result,
+      });
+    } catch (error) {
+      if (connection) {
+        await connection.end();
+      }
+
+      console.error("ERROR IMPORT GURU:", error.message);
+      console.error("Error stack:", error.stack);
+      res.status(500).json({
+        error: "Gagal mengimport guru: " + error.message,
+      });
+    }
+  }
+);
+
+// Helper function: Read Excel teachers from buffer
+async function readExcelTeachersFromBuffer(buffer) {
+  const XLSX = require("xlsx");
+
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const sheetName = workbook.SheetNames[0];
+  const worksheet = workbook.Sheets[sheetName];
+
+  const data = XLSX.utils.sheet_to_json(worksheet);
+
+  console.log("Raw Excel data from buffer:", data);
+
+  const teachers = [];
+
+  data.forEach((row, index) => {
+    try {
+      const teacherData = mapExcelRowToTeacher(row, index + 2);
+      if (teacherData) {
+        teachers.push(teacherData);
+      }
+    } catch (error) {
+      console.error(`Error processing row ${index + 2}:`, error);
+    }
+  });
+
+  console.log(`Processed ${teachers.length} teachers from Excel buffer`);
+  return teachers;
+}
+
+// Helper function: Map Excel row to teacher object
+function mapExcelRowToTeacher(row, rowNumber) {
+  // Normalize keys to lowercase for case-insensitive matching
+  const normalizedRow = {};
+  Object.keys(row).forEach((key) => {
+    normalizedRow[key.toLowerCase().trim()] = row[key];
+  });
+
+  console.log(`Processing row ${rowNumber}:`, normalizedRow);
+
+  // Map columns
+  const nama = normalizedRow["nama"] || normalizedRow["nama*"] || "";
+  const email = normalizedRow["email"] || normalizedRow["email*"] || "";
+  const nip = normalizedRow["nip"] || "";
+  
+  let jenisKelamin = (normalizedRow["jenis kelamin"] || normalizedRow["jenis kelamin*"] || "").toString().trim();
+  
+  // Normalize gender values
+  if (jenisKelamin.toLowerCase() === "laki-laki" || jenisKelamin.toLowerCase() === "l") {
+    jenisKelamin = "L";
+  } else if (jenisKelamin.toLowerCase() === "perempuan" || jenisKelamin.toLowerCase() === "p") {
+    jenisKelamin = "P";
+  }
+
+  const mataPelajaranNames = normalizedRow["mata pelajaran"] || "";
+  const kelasNames = normalizedRow["kelas"] || "";
+  const waliKelasNama = normalizedRow["wali kelas"] || "";
+  
+  let statusKepegawaian = (normalizedRow["status kepegawaian"] || "").toString().trim().toLowerCase();
+  
+  // Normalize employment status
+  if (statusKepegawaian && !["tetap", "tidak_tetap"].includes(statusKepegawaian)) {
+    statusKepegawaian = ""; // Invalid value, set to empty
+  }
+
+  // Validate required fields
+  if (!nama || !email || !jenisKelamin) {
+    console.log(`Skipping row ${rowNumber}: Missing required data`, {
+      nama,
+      email,
+      jenisKelamin,
+    });
+    return null;
+  }
+
+  const teacher = {
+    nama: nama.toString().trim(),
+    email: email.toString().trim(),
+    nip: nip ? nip.toString().trim() : null,
+    jenis_kelamin: jenisKelamin,
+    mata_pelajaran_names: mataPelajaranNames.toString().trim(),
+    kelas_names: kelasNames.toString().trim(),
+    wali_kelas_nama: waliKelasNama ? waliKelasNama.toString().trim() : null,
+    status_kepegawaian: statusKepegawaian || null,
+    row_number: rowNumber,
+  };
+
+  console.log(`Mapped teacher data for row ${rowNumber}:`, teacher);
+  return teacher;
+}
+
+// Helper function: Process teacher import
+async function processTeacherImport(
+  importedTeachers,
+  subjectList,
+  classList,
+  sekolahId
+) {
+  let connection;
+  const results = {
+    success: 0,
+    failed: 0,
+    errors: [],
+  };
+
+  try {
+    connection = await getConnection();
+
+    for (const teacherData of importedTeachers) {
+      try {
+        // Validate required fields
+        if (!teacherData.nama || !teacherData.email || !teacherData.jenis_kelamin) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${teacherData.row_number}: Data required tidak lengkap`
+          );
+          continue;
+        }
+
+        // Check for duplicate email (within same school)
+        const [existingEmail] = await connection.execute(
+          "SELECT u.id FROM users u INNER JOIN user_schools us ON u.id = us.user_id WHERE u.email = ? AND us.sekolah_id = ?",
+          [teacherData.email, sekolahId]
+        );
+
+        if (existingEmail.length > 0) {
+          results.failed++;
+          results.errors.push(
+            `Baris ${teacherData.row_number}: Email '${teacherData.email}' sudah terdaftar di sekolah ini`
+          );
+          continue;
+        }
+
+        // Start transaction for this teacher
+        await connection.beginTransaction();
+
+        try {
+          const userId = crypto.randomUUID();
+          const guruId = crypto.randomUUID();
+          const password = "password123";
+          const hashedPassword = await bcrypt.hash(password, 10);
+          const createdAt = new Date()
+            .toISOString()
+            .slice(0, 19)
+            .replace("T", " ");
+
+          // 1. Create user
+          await connection.execute(
+            'INSERT INTO users (id, nama, email, password, role, sekolah_id, created_at, updated_at) VALUES (?, ?, ?, ?, "guru", ?, ?, ?)',
+            [userId, teacherData.nama, teacherData.email, hashedPassword, sekolahId, createdAt, createdAt]
+          );
+
+          // 2. Create user_schools
+          const userSchoolId = crypto.randomUUID();
+          await connection.execute(
+            "INSERT INTO users_schools (id, user_id, sekolah_id, is_active, created_at) VALUES (?, ?, ?, TRUE, ?)",
+            [userSchoolId, userId, sekolahId, createdAt]
+          );
+
+          // 3. Create users_roles
+          await connection.execute(
+            "INSERT INTO users_roles (user_school_id, role, is_active, created_at) VALUES (?, ?, TRUE, ?)",
+            [userSchoolId, "guru", createdAt]
+          );
+
+          // 4. Find wali_kelas_id if provided
+          let waliKelasId = null;
+          if (teacherData.wali_kelas_nama) {
+            const kelasItem = classList.find(
+              (cls) => cls.nama.toLowerCase() === teacherData.wali_kelas_nama.toLowerCase()
+            );
+            if (kelasItem) {
+              waliKelasId = kelasItem.id;
+            } else {
+              console.log(`Warning: Wali kelas '${teacherData.wali_kelas_nama}' not found for row ${teacherData.row_number}`);
+            }
+          }
+
+          // 5. Create guru record
+          await connection.execute(
+            "INSERT INTO guru (id, user_id, nama, nip, jenis_kelamin, wali_kelas_id, status_kepegawaian, sekolah_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+              guruId,
+              userId,
+              teacherData.nama,
+              teacherData.nip,
+              teacherData.jenis_kelamin,
+              waliKelasId,
+              teacherData.status_kepegawaian,
+              sekolahId,
+              createdAt,
+              createdAt,
+            ]
+          );
+
+          // 6. Add subject assignments
+          if (teacherData.mata_pelajaran_names) {
+            const subjectNames = teacherData.mata_pelajaran_names
+              .split(",")
+              .map((name) => name.trim())
+              .filter((name) => name !== "");
+
+            for (const subjectName of subjectNames) {
+              const subjectItem = subjectList.find(
+                (sub) => sub.nama.toLowerCase() === subjectName.toLowerCase()
+              );
+
+              if (subjectItem) {
+                const relationId = crypto.randomUUID();
+                await connection.execute(
+                  "INSERT INTO guru_mata_pelajaran (id, guru_id, mata_pelajaran_id, sekolah_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                  [relationId, guruId, subjectItem.id, sekolahId, createdAt]
+                );
+              } else {
+                console.log(`Warning: Subject '${subjectName}' not found for row ${teacherData.row_number}`);
+              }
+            }
+          }
+
+          // 7. Add class assignments
+          if (teacherData.kelas_names) {
+            const kelasNames = teacherData.kelas_names
+              .split(",")
+              .map((name) => name.trim())
+              .filter((name) => name !== "");
+
+            for (const kelasName of kelasNames) {
+              const kelasItem = classList.find(
+                (cls) => cls.nama.toLowerCase() === kelasName.toLowerCase()
+              );
+
+              if (kelasItem) {
+                const relationId = crypto.randomUUID();
+                await connection.execute(
+                  "INSERT INTO guru_kelas (id, guru_id, kelas_id, sekolah_id, created_at) VALUES (?, ?, ?, ?, ?)",
+                  [relationId, guruId, kelasItem.id, sekolahId, createdAt]
+                );
+              } else {
+                console.log(`Warning: Class '${kelasName}' not found for row ${teacherData.row_number}`);
+              }
+            }
+          }
+
+          await connection.commit();
+          results.success++;
+          console.log(`✅ Successfully imported teacher: ${teacherData.email}`);
+        } catch (transactionError) {
+          await connection.rollback();
+          throw transactionError;
+        }
+      } catch (teacherError) {
+        results.failed++;
+        results.errors.push(
+          `Baris ${teacherData.row_number}: ${teacherError.message}`
+        );
+        console.error(
+          `Error importing teacher ${teacherData.email}:`,
+          teacherError.message
+        );
+      }
+    }
+
+    return results;
+  } catch (error) {
+    throw error;
+  } finally {
+    if (connection) {
+      await connection.end();
+    }
+  }
+}
+
 
 // Kelola Siswa (WITH PAGINATION & FILTER)
 app.get("/api/siswa", authenticateTokenAndSchool, async (req, res) => {
@@ -5152,23 +5807,38 @@ app.get("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
 
     const connection = await getConnection();
 
-    // Query yang diperbaiki - dengan filter sekolah_id
+    // Query from guru table with proper joins
     const [guru] = await connection.execute(
       `
       SELECT 
-        u.*, 
-        k.nama as kelas_nama,
-        (SELECT COUNT(*) FROM kelas WHERE wali_kelas_id = u.id) as is_wali_kelas,
+        g.id,
+        g.user_id,
+        g.nama,
+        g.nip,
+        g.jenis_kelamin,
+        g.wali_kelas_id,
+        g.status_kepegawaian,
+        g.sekolah_id,
+        g.created_at,
+        g.updated_at,
+        u.email,
+        wk.nama as wali_kelas_nama,
+        GROUP_CONCAT(DISTINCT mp.id) as mata_pelajaran_ids,
         GROUP_CONCAT(DISTINCT mp.nama) as mata_pelajaran_names,
-        GROUP_CONCAT(DISTINCT mp.id) as mata_pelajaran_ids
-      FROM users u 
-      LEFT JOIN kelas k ON u.kelas_id = k.id 
-      LEFT JOIN guru_mata_pelajaran gmp ON u.id = gmp.guru_id
+        GROUP_CONCAT(DISTINCT k.id) as kelas_ids,
+        GROUP_CONCAT(DISTINCT k.nama) as kelas_names,
+        CASE WHEN g.wali_kelas_id IS NOT NULL THEN 1 ELSE 0 END as is_wali_kelas
+      FROM guru g
+      INNER JOIN users u ON g.user_id = u.id
+      LEFT JOIN kelas wk ON g.wali_kelas_id = wk.id
+      LEFT JOIN guru_mata_pelajaran gmp ON g.id = gmp.guru_id
       LEFT JOIN mata_pelajaran mp ON gmp.mata_pelajaran_id = mp.id
-      WHERE u.id = ? AND u.sekolah_id = ? AND u.role = 'guru'
-      GROUP BY u.id
+      LEFT JOIN guru_kelas gk ON g.id = gk.guru_id
+      LEFT JOIN kelas k ON gk.kelas_id = k.id
+      WHERE g.id = ? AND g.sekolah_id = ?
+      GROUP BY g.id, u.email, wk.nama
     `,
-      [id, req.sekolah_id] // Tambahkan sekolah_id
+      [id, req.sekolah_id]
     );
 
     await connection.end();
@@ -5783,113 +6453,189 @@ app.post(
 );
 
 app.post("/api/guru", authenticateTokenAndSchool, async (req, res) => {
+  let connection;
   try {
     console.log("Menambah guru baru:", req.body);
 
-    const { nama, email, kelas_id, nip, is_wali_kelas } = req.body;
-    const id = crypto.randomUUID();
+    const {
+      nama,
+      email,
+      nip,
+      jenis_kelamin,
+      subject_ids,
+      class_ids,
+      wali_kelas_id,
+      status_kepegawaian,
+    } = req.body;
 
-    // Debug: Pastikan password valid
-    const password = "password123";
-    console.log("Password to hash:", password, "Type:", typeof password);
-
-    if (!password || typeof password !== "string") {
-      console.error("Invalid password:", password);
-      return res.status(400).json({ error: "Password tidak valid" });
+    // Validation
+    if (!nama || !email || !jenis_kelamin) {
+      return res.status(400).json({
+        error: "Nama, email, dan jenis kelamin wajib diisi",
+      });
     }
+
+    if (!["L", "P"].includes(jenis_kelamin)) {
+      return res.status(400).json({
+        error: "Jenis kelamin harus L (Laki-laki) atau P (Perempuan)",
+      });
+    }
+
+    const userId = crypto.randomUUID();
+    const guruId = crypto.randomUUID();
+    const password = "password123";
+
+    console.log("Creating user with ID:", userId);
+    console.log("Creating guru with ID:", guruId);
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    connection = await getConnection();
+
+    await connection.beginTransaction();
 
     try {
-      const hashedPassword = await bcrypt.hash(password, 10);
-      console.log("Password hashed successfully");
+      const createdAt = new Date()
+        .toISOString()
+        .slice(0, 19)
+        .replace("T", " ");
 
-      const connection = await getConnection();
+      // 1. Create user record
+      await connection.execute(
+        'INSERT INTO users (id, nama, email, password, role, sekolah_id, created_at, updated_at) VALUES (?, ?, ?, ?, "guru", ?, ?, ?)',
+        [userId, nama, email, hashedPassword, req.sekolah_id, createdAt, createdAt]
+      );
 
-      // Use transaction to ensure users_schools and users_roles are created together
-      await connection.beginTransaction();
+      // 2. Create user_schools record
+      const userSchoolId = crypto.randomUUID();
+      await connection.execute(
+        "INSERT INTO users_schools (id, user_id, sekolah_id, is_active, created_at) VALUES (?, ?, ?, TRUE, ?)",
+        [userSchoolId, userId, req.sekolah_id, createdAt]
+      );
 
-      try {
-        await connection.execute(
-          'INSERT INTO users (id, nama, email, password, role, kelas_id, nip, is_wali_kelas, sekolah_id) VALUES (?, ?, ?, ?, "guru", ?, ?, ?, ?)',
-          [
-            id,
-            nama,
-            email,
-            hashedPassword,
-            kelas_id || null,
-            nip || null,
-            is_wali_kelas || false,
-            req.sekolah_id,
-          ]
-        );
+      // 3. Create users_roles record
+      await connection.execute(
+        "INSERT INTO users_roles (user_school_id, role, is_active, created_at) VALUES (?, ?, TRUE, ?)",
+        [userSchoolId, "guru", createdAt]
+      );
 
-        const createdAt = new Date()
-          .toISOString()
-          .slice(0, 19)
-          .replace("T", " ");
-        const userSchoolId = crypto.randomUUID();
+      // Normalize empty values to null
+      const normalizedNip = nip && nip.trim() !== '' ? nip : null;
+      const normalizedWaliKelasId = wali_kelas_id && wali_kelas_id.trim() !== '' ? wali_kelas_id : null;
+      const normalizedStatusKepegawaian = status_kepegawaian && status_kepegawaian.trim() !== '' ? status_kepegawaian : null;
 
-        await connection.execute(
-          "INSERT INTO users_schools (id, user_id, sekolah_id, is_active, created_at) VALUES (?, ?, ?, TRUE, ?)",
-          [userSchoolId, id, req.sekolah_id, createdAt]
-        );
+      // 4. Create guru record
+      await connection.execute(
+        "INSERT INTO guru (id, user_id, nama, nip, jenis_kelamin, wali_kelas_id, status_kepegawaian, sekolah_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+          guruId,
+          userId,
+          nama,
+          normalizedNip,
+          jenis_kelamin,
+          normalizedWaliKelasId,
+          normalizedStatusKepegawaian,
+          req.sekolah_id,
+          createdAt,
+          createdAt,
+        ]
+      );
 
-        await connection.execute(
-          "INSERT INTO users_roles (user_school_id, role, is_active, created_at) VALUES (?, ?, TRUE, ?)",
-          [userSchoolId, "guru", createdAt]
-        );
-
-        await connection.commit();
-        await connection.end();
-
-        console.log("Guru berhasil ditambahkan:", email);
-        res.json({
-          message: "Guru berhasil ditambahkan",
-          id,
-          info: "Password default: password123",
-        });
-      } catch (txErr) {
-        await connection.rollback();
-        await connection.end();
-        console.error("TRANSACTION ERROR POST GURU:", txErr.message);
-        return res.status(500).json({ error: "Gagal menambah guru" });
+      // 5. Add subject assignments if provided
+      if (subject_ids && Array.isArray(subject_ids) && subject_ids.length > 0) {
+        for (const subjectId of subject_ids) {
+          const relationId = crypto.randomUUID();
+          await connection.execute(
+            "INSERT INTO guru_mata_pelajaran (id, guru_id, mata_pelajaran_id, sekolah_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            [relationId, guruId, subjectId, req.sekolah_id, createdAt]
+          );
+        }
+        console.log(`✅ Added ${subject_ids.length} subject assignments`);
       }
-    } catch (hashError) {
-      console.error("BCRYPT HASH ERROR:", hashError.message);
-      console.error("Hash error details:", hashError);
-      res.status(500).json({ error: "Gagal mengenkripsi password" });
+
+      // 6. Add class assignments if provided
+      if (class_ids && Array.isArray(class_ids) && class_ids.length > 0) {
+        for (const classId of class_ids) {
+          const relationId = crypto.randomUUID();
+          await connection.execute(
+            "INSERT INTO guru_kelas (id, guru_id, kelas_id, sekolah_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            [relationId, guruId, classId, req.sekolah_id, createdAt]
+          );
+        }
+        console.log(`✅ Added ${class_ids.length} class assignments`);
+      }
+
+      await connection.commit();
+      await connection.end();
+
+      console.log("✅ Guru berhasil ditambahkan:", email);
+      res.json({
+        success: true,
+        message: "Guru berhasil ditambahkan",
+        id: guruId,
+        user_id: userId,
+        info: "Password default: password123",
+      });
+    } catch (txErr) {
+      await connection.rollback();
+      await connection.end();
+      console.error("TRANSACTION ERROR POST GURU:", txErr.message);
+      throw txErr;
     }
   } catch (error) {
+    if (connection) await connection.end();
+    
     console.error("ERROR POST GURU:", error.message);
     console.error("SQL Error code:", error.code);
-    console.error("Error stack:", error.stack);
 
     if (error.code === "ER_DUP_ENTRY") {
       return res.status(400).json({ error: "Email sudah terdaftar" });
     }
+    if (error.code === "ER_NO_REFERENCED_ROW_2") {
+      return res.status(400).json({
+        error: "ID mata pelajaran, kelas, atau wali kelas tidak valid",
+      });
+    }
 
-    res.status(500).json({ error: "Gagal menambah guru" });
+    res.status(500).json({ error: "Gagal menambah guru: " + error.message });
   }
 });
 
 // Update Guru dengan Mata Pelajaran
 app.put("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
+  let connection;
   try {
-    const { id } = req.params;
+    const { id } = req.params; // This is guru.id, not user_id
     console.log("Update guru:", id, req.body);
 
-    // Pastikan semua nilai tidak undefined
-    const { nama, email, kelas_id, nip, is_wali_kelas } = req.body;
+    const {
+      nama,
+      email,
+      nip,
+      jenis_kelamin,
+      subject_ids,
+      class_ids,
+      wali_kelas_id,
+      status_kepegawaian,
+    } = req.body;
 
-    // Konversi nilai yang mungkin undefined ke null
-    const cleanKelasId = kelas_id || null;
-    const cleanNip = nip || null;
-    const cleanIsWaliKelas = is_wali_kelas || false;
+    // Validation
+    if (!nama || !email || !jenis_kelamin) {
+      return res.status(400).json({
+        error: "Nama, email, dan jenis kelamin wajib diisi",
+      });
+    }
 
-    const connection = await getConnection();
+    if (!["L", "P"].includes(jenis_kelamin)) {
+      return res.status(400).json({
+        error: "Jenis kelamin harus L (Laki-laki) atau P (Perempuan)",
+      });
+    }
 
-    // Cek apakah guru termasuk dalam sekolah yang sama
+    connection = await getConnection();
+
+    // Check if guru exists and belongs to the same school
     const [existingGuru] = await connection.execute(
-      "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+      "SELECT g.id, g.user_id FROM guru g WHERE g.id = ? AND g.sekolah_id = ?",
       [id, req.sekolah_id]
     );
 
@@ -5900,56 +6646,91 @@ app.put("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
         .json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
     }
 
+    const userId = existingGuru[0].user_id;
+    const updatedAt = new Date().toISOString().slice(0, 19).replace("T", " ");
+
     await connection.beginTransaction();
 
     try {
-      const updateData = [
-        nama,
-        email,
-        cleanKelasId,
-        cleanNip,
-        cleanIsWaliKelas,
-        id,
-      ];
-
-      console.log("Update data:", updateData);
-
+      // 1. Update users table
       await connection.execute(
-        "UPDATE users SET nama = ?, email = ?, kelas_id = ?, nip = ?, is_wali_kelas = ? WHERE id = ? AND sekolah_id = ?",
-        [...updateData.slice(0, 5), id, req.sekolah_id]
+        "UPDATE users SET nama = ?, email = ?, updated_at = ? WHERE id = ?",
+        [nama, email, updatedAt, userId]
       );
 
-      // Ensure users_schools exists for this guru in this sekolah
-      const [existingUS] = await connection.execute(
-        "SELECT id FROM users_schools WHERE user_id = ? AND sekolah_id = ?",
-        [id, req.sekolah_id]
+      // 2. Update guru table
+      await connection.execute(
+        "UPDATE guru SET nama = ?, nip = ?, jenis_kelamin = ?, wali_kelas_id = ?, status_kepegawaian = ?, updated_at = ? WHERE id = ? AND sekolah_id = ?",
+        [
+          nama,
+          nip || null,
+          jenis_kelamin,
+          wali_kelas_id || null,
+          status_kepegawaian || null,
+          updatedAt,
+          id,
+          req.sekolah_id,
+        ]
       );
 
-      const createdAt = new Date().toISOString().slice(0, 19).replace("T", " ");
+      // 3. Sync subject assignments
+      // Get current subjects
+      const [currentSubjects] = await connection.execute(
+        "SELECT mata_pelajaran_id FROM guru_mata_pelajaran WHERE guru_id = ?",
+        [id]
+      );
+      const currentSubjectIds = currentSubjects.map(
+        (s) => s.mata_pelajaran_id
+      );
+      const newSubjectIds = subject_ids || [];
 
-      let userSchoolId;
-      if (existingUS.length === 0) {
-        userSchoolId = crypto.randomUUID();
-        await connection.execute(
-          "INSERT INTO users_schools (id, user_id, sekolah_id, is_active, created_at) VALUES (?, ?, ?, TRUE, ?)",
-          [userSchoolId, id, req.sekolah_id, createdAt]
-        );
-
-        await connection.execute(
-          "INSERT INTO users_roles (user_school_id, role, is_active, created_at) VALUES (?, ?, TRUE, ?)",
-          [userSchoolId, "guru", createdAt]
-        );
-      } else {
-        userSchoolId = existingUS[0].id;
-        // Ensure role exists
-        const [existingRoles] = await connection.execute(
-          "SELECT id FROM users_roles WHERE user_school_id = ? AND role = ?",
-          [userSchoolId, "guru"]
-        );
-        if (existingRoles.length === 0) {
+      // Remove subjects that are no longer assigned
+      for (const currentId of currentSubjectIds) {
+        if (!newSubjectIds.includes(currentId)) {
           await connection.execute(
-            "INSERT INTO users_roles (user_school_id, role, is_active, created_at) VALUES (?, ?, TRUE, ?)",
-            [userSchoolId, "guru", createdAt]
+            "DELETE FROM guru_mata_pelajaran WHERE guru_id = ? AND mata_pelajaran_id = ?",
+            [id, currentId]
+          );
+        }
+      }
+
+      // Add new subjects
+      for (const newId of newSubjectIds) {
+        if (!currentSubjectIds.includes(newId)) {
+          const relationId = crypto.randomUUID();
+          await connection.execute(
+            "INSERT INTO guru_mata_pelajaran (id, guru_id, mata_pelajaran_id, sekolah_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            [relationId, id, newId, req.sekolah_id, updatedAt]
+          );
+        }
+      }
+
+      // 4. Sync class assignments
+      // Get current classes
+      const [currentClasses] = await connection.execute(
+        "SELECT kelas_id FROM guru_kelas WHERE guru_id = ?",
+        [id]
+      );
+      const currentClassIds = currentClasses.map((c) => c.kelas_id);
+      const newClassIds = class_ids || [];
+
+      // Remove classes that are no longer assigned
+      for (const currentId of currentClassIds) {
+        if (!newClassIds.includes(currentId)) {
+          await connection.execute(
+            "DELETE FROM guru_kelas WHERE guru_id = ? AND kelas_id = ?",
+            [id, currentId]
+          );
+        }
+      }
+
+      // Add new classes
+      for (const newId of newClassIds) {
+        if (!currentClassIds.includes(newId)) {
+          const relationId = crypto.randomUUID();
+          await connection.execute(
+            "INSERT INTO guru_kelas (id, guru_id, kelas_id, sekolah_id, created_at) VALUES (?, ?, ?, ?, ?)",
+            [relationId, id, newId, req.sekolah_id, updatedAt]
           );
         }
       }
@@ -5957,8 +6738,11 @@ app.put("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
       await connection.commit();
       await connection.end();
 
-      console.log("Guru berhasil diupdate:", id);
-      res.json({ message: "Guru berhasil diupdate" });
+      console.log("✅ Guru berhasil diupdate:", id);
+      res.json({
+        success: true,
+        message: "Guru berhasil diupdate",
+      });
     } catch (txErr) {
       await connection.rollback();
       await connection.end();
@@ -5966,17 +6750,18 @@ app.put("/api/guru/:id", authenticateTokenAndSchool, async (req, res) => {
       if (txErr.code === "ER_DUP_ENTRY") {
         return res.status(400).json({ error: "Email sudah terdaftar" });
       }
-      return res.status(500).json({ error: "Gagal mengupdate guru" });
+      if (txErr.code === "ER_NO_REFERENCED_ROW_2") {
+        return res.status(400).json({
+          error: "ID mata pelajaran, kelas, atau wali kelas tidak valid",
+        });
+      }
+      throw txErr;
     }
   } catch (error) {
+    if (connection) await connection.end();
+
     console.error("ERROR PUT GURU:", error.message);
     console.error("SQL Error code:", error.code);
-    console.error("Error details:", error);
-
-    if (error.code === "ER_DUP_ENTRY") {
-      return res.status(400).json({ error: "Email sudah terdaftar" });
-    }
-
     res.status(500).json({ error: "Gagal mengupdate guru" });
   }
 });
