@@ -2859,7 +2859,7 @@ app.post(
       });
 
       // Read Excel file from buffer
-      const importedTeachers = await readExcelTeachersFromBuffer(
+      const importedTeachers = await readExcelTeachersFromBufferNew(
         req.file.buffer
       );
 
@@ -2887,7 +2887,7 @@ app.post(
       await connection.end();
 
       // Process import with sekolah_id
-      const result = await processTeacherImport(
+      const result = await processTeacherImportNew(
         importedTeachers,
         subjectList,
         classList,
@@ -2914,7 +2914,7 @@ app.post(
 );
 
 // Helper function: Read Excel teachers from buffer
-async function readExcelTeachersFromBuffer(buffer) {
+async function readExcelTeachersFromBufferNew(buffer) {
   const XLSX = require("xlsx");
 
   const workbook = XLSX.read(buffer, { type: "buffer" });
@@ -2929,7 +2929,7 @@ async function readExcelTeachersFromBuffer(buffer) {
 
   data.forEach((row, index) => {
     try {
-      const teacherData = mapExcelRowToTeacher(row, index + 2);
+      const teacherData = mapExcelRowToTeacherNew(row, index + 2);
       if (teacherData) {
         teachers.push(teacherData);
       }
@@ -2943,7 +2943,8 @@ async function readExcelTeachersFromBuffer(buffer) {
 }
 
 // Helper function: Map Excel row to teacher object
-function mapExcelRowToTeacher(row, rowNumber) {
+// Helper function: Map Excel row to teacher object (NEW LOGIC - supports multiple classes/subjects)
+function mapExcelRowToTeacherNew(row, rowNumber) {
   // Normalize keys to lowercase for case-insensitive matching
   const normalizedRow = {};
   Object.keys(row).forEach((key) => {
@@ -3004,7 +3005,7 @@ function mapExcelRowToTeacher(row, rowNumber) {
 }
 
 // Helper function: Process teacher import
-async function processTeacherImport(
+async function processTeacherImportNew(
   importedTeachers,
   subjectList,
   classList,
@@ -3033,7 +3034,7 @@ async function processTeacherImport(
 
         // Check for duplicate email (within same school)
         const [existingEmail] = await connection.execute(
-          "SELECT u.id FROM users u INNER JOIN user_schools us ON u.id = us.user_id WHERE u.email = ? AND us.sekolah_id = ?",
+          "SELECT u.id FROM users u INNER JOIN users_schools us ON u.id = us.user_id WHERE u.email = ? AND us.sekolah_id = ?",
           [teacherData.email, sekolahId]
         );
 
@@ -3138,7 +3139,34 @@ async function processTeacherImport(
               .map((name) => name.trim())
               .filter((name) => name !== "");
 
+            let allClassesFound = true;
+            const missingClasses = [];
+
             for (const kelasName of kelasNames) {
+              // Debug logging
+              console.log(`Searching for class: '${kelasName}' (length: ${kelasName.length})`);
+              
+              // Log available classes for debugging (only first 5 to avoid spam)
+              if (teacherData.row_number === 2) { 
+                 console.log("Import Sekolah ID:", sekolahId);
+                 console.log("Available classes in DB:", classList.map(c => `'${c.nama}'`).join(", "));
+                 
+                 // Deep debug for "7A" mismatch
+                 if (kelasName === '7A') {
+                    console.log(`DEBUG '7A' MISMATCH:`);
+                    console.log(`Input '7A' codes: ${kelasName.split('').map(c => c.charCodeAt(0)).join(',')}`);
+                    
+                    const dbClass = classList.find(c => c.nama.includes('7A'));
+                    if (dbClass) {
+                        console.log(`DB '${dbClass.nama}' codes: ${dbClass.nama.split('').map(c => c.charCodeAt(0)).join(',')}`);
+                        console.log(`Strict match: ${dbClass.nama === kelasName}`);
+                        console.log(`LowerCase match: ${dbClass.nama.toLowerCase() === kelasName.toLowerCase()}`);
+                    } else {
+                        console.log("No class containing '7A' found in DB list for this school");
+                    }
+                 }
+              }
+
               const kelasItem = classList.find(
                 (cls) => cls.nama.toLowerCase() === kelasName.toLowerCase()
               );
@@ -3150,8 +3178,20 @@ async function processTeacherImport(
                   [relationId, guruId, kelasItem.id, sekolahId, createdAt]
                 );
               } else {
+                allClassesFound = false;
+                missingClasses.push(kelasName);
                 console.log(`Warning: Class '${kelasName}' not found for row ${teacherData.row_number}`);
               }
+            }
+
+            // If any classes not found, rollback and fail this row
+            if (!allClassesFound) {
+              await connection.rollback();
+              results.failed++;
+              results.errors.push(
+                `Baris ${teacherData.row_number}: Kelas '${missingClasses.join(", ")}' tidak ditemukan`
+              );
+              continue;
             }
           }
 
