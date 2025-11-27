@@ -12984,15 +12984,15 @@ app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
     // Role-based filtering (existing logic)
     if (req.user.role === "wali") {
       conditions.push(
-        "(p.role_target LIKE 'wali' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')"
+        "(p.role_target = 'wali' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')"
       );
     } else if (req.user.role === "guru") {
       conditions.push(
-        "(p.role_target LIKE 'guru' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')"
+        "(p.role_target = 'guru' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')"
       );
     } else if (req.user.role === "siswa") {
       conditions.push(
-        "(p.role_target LIKE 'siswa' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')"
+        "(p.role_target = 'siswa' OR p.role_target = 'semua' OR p.role_target IS NULL OR p.role_target = '')"
       );
     }
     // Admin dan super_admin bisa lihat semua
