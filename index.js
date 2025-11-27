@@ -12898,7 +12898,7 @@ app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
   try {
     const { page, limit, search, prioritas, role_target, status } = req.query;
 
-    console.log(`Mengambil data pengumuman dengan filter:`, {
+    console.log(`DEBUG: Mengambil data pengumuman dengan filter:`, {
       page,
       limit,
       search,
@@ -12906,7 +12906,7 @@ app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
       role_target,
       status,
     });
-    console.log(`User role: ${req.user.role}, sekolah: ${req.sekolah_id}`);
+    console.log(`DEBUG: User role: ${req.user.role}, sekolah: ${req.sekolah_id}`);
 
     const connection = await getConnection();
 
@@ -12957,6 +12957,9 @@ app.get("/api/pengumuman", authenticateTokenAndSchool, async (req, res) => {
 
     const whereClause =
       conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    console.log("DEBUG: Generated WHERE clause:", whereClause);
+    console.log("DEBUG: Query params:", params);
 
     // Build pagination
     const { limitClause, currentPage, perPage } = buildPaginationQuery(
