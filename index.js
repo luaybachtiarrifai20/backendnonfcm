@@ -12512,8 +12512,9 @@ app.get(
       const connection = await getConnection();
 
       // Cek apakah guru termasuk dalam sekolah yang sama
+      // Note: guruId is from the guru table, not users table
       const [guruCheck] = await connection.execute(
-        "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+        "SELECT id FROM guru WHERE id = ? AND sekolah_id = ?",
         [guruId, req.sekolah_id]
       );
 
@@ -12530,14 +12531,14 @@ app.get(
         kk.*,
         mp.nama as mata_pelajaran_nama,
         kls.nama as kelas_nama,
-        u.nama as guru_nama,
+        g.nama as guru_nama,
         bm.judul_bab,
         sbm.judul_sub_bab,
         GROUP_CONCAT(DISTINCT s.nama) as siswa_target_names
       FROM kegiatan_kelas kk
       JOIN mata_pelajaran mp ON kk.mata_pelajaran_id = mp.id AND mp.sekolah_id = ?
       JOIN kelas kls ON kk.kelas_id = kls.id AND kls.sekolah_id = ?
-      JOIN users u ON kk.guru_id = u.id AND u.sekolah_id = ?
+      JOIN guru g ON kk.guru_id = g.id AND g.sekolah_id = ?
       LEFT JOIN bab_materi bm ON kk.bab_id = bm.id
       LEFT JOIN sub_bab_materi sbm ON kk.sub_bab_id = sbm.id
       LEFT JOIN kegiatan_siswa_target kst ON kk.id = kst.kegiatan_id
