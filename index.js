@@ -4961,6 +4961,15 @@ app.get("/api/mata-pelajaran", authenticateTokenAndSchool, async (req, res) => {
       params.push(status);
     }
 
+    const { subject_ids } = req.query;
+    if (subject_ids) {
+      const ids = subject_ids.split(",").map((id) => id.trim());
+      if (ids.length > 0) {
+        conditions.push(`mp.id IN (${ids.map(() => "?").join(",")})`);
+        params.push(...ids);
+      }
+    }
+
     const whereClause =
       conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
@@ -9588,18 +9597,75 @@ app.get(
           .json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
       }
 
-      const [mataPelajaran] = await connection.execute(
-        `SELECT mp.* 
-       FROM mata_pelajaran mp
-       JOIN guru_mata_pelajaran gmp ON mp.id = gmp.mata_pelajaran_id
-       WHERE gmp.guru_id = ? AND mp.sekolah_id = ?`,
-        [id, req.sekolah_id]
+      // Build filter conditions
+      const conditions = [
+        "gmp.guru_id = ?",
+        "mp.sekolah_id = ?",
+      ];
+      const params = [id, req.sekolah_id];
+
+      const { page, limit, search, subject_ids } = req.query;
+
+      if (search) {
+        conditions.push(
+          "(mp.nama LIKE ? OR mp.kode LIKE ? OR mp.deskripsi LIKE ?)"
+        );
+        params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+      }
+
+      if (subject_ids) {
+        const ids = subject_ids.split(",").map((id) => id.trim());
+        if (ids.length > 0) {
+          conditions.push(`mp.id IN (${ids.map(() => "?").join(",")})`);
+          params.push(...ids);
+        }
+      }
+
+      const whereClause = `WHERE ${conditions.join(" AND ")}`;
+
+      // Build pagination
+      const { limitClause, currentPage, perPage } = buildPaginationQuery(
+        page,
+        limit
       );
+
+      // Count total items
+      const countQuery = `
+        SELECT COUNT(*) as total
+        FROM mata_pelajaran mp
+        JOIN guru_mata_pelajaran gmp ON mp.id = gmp.mata_pelajaran_id
+        ${whereClause}
+      `;
+      const [countResult] = await connection.execute(countQuery, params);
+      const totalItems = countResult[0].total;
+
+      // Get paginated data
+      const dataQuery = `
+        SELECT mp.* 
+        FROM mata_pelajaran mp
+        JOIN guru_mata_pelajaran gmp ON mp.id = gmp.mata_pelajaran_id
+        ${whereClause}
+        ORDER BY mp.nama ASC
+        ${limitClause}
+      `;
+      const [mataPelajaran] = await connection.execute(dataQuery, params);
 
       await connection.end();
 
-      console.log("Mata pelajaran ditemukan:", mataPelajaran.length);
-      res.json(mataPelajaran);
+      // Calculate pagination metadata
+      const pagination = calculatePaginationMeta(
+        totalItems,
+        currentPage,
+        perPage
+      );
+
+      res.json({
+        success: true,
+        data: mataPelajaran,
+        pagination,
+      });
+
+
     } catch (error) {
       console.error("ERROR GET MATA PELAJARAN BY GURU:", error.message);
       res.status(500).json({ error: "Gagal mengambil mata pelajaran guru" });
