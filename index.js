@@ -9231,8 +9231,41 @@ app.delete("/api/konten-materi/:id", authenticateToken, async (req, res) => {
 // Kelola Materi
 app.get("/api/materi", authenticateToken, async (req, res) => {
   try {
-    const { guru_id, mata_pelajaran_id } = req.query;
-    console.log("Mengambil data materi");
+    let { guru_id, mata_pelajaran_id } = req.query;
+    console.log("Mengambil data materi, guru_id:", guru_id);
+
+    const connection = await getConnection();
+
+    // If guru_id is provided, check if it's a user_id and convert to guru_id
+    if (guru_id) {
+      // First, try to find guru by user_id
+      const [guruByUserId] = await connection.execute(
+        "SELECT id FROM guru WHERE user_id = ?",
+        [guru_id]
+      );
+
+      if (guruByUserId.length > 0) {
+        // It's a user_id, use the corresponding guru_id
+        guru_id = guruByUserId[0].id;
+        console.log("Converted user_id to guru_id:", guru_id);
+      } else {
+        // Check if it's already a guru_id
+        const [guruById] = await connection.execute(
+          "SELECT id FROM guru WHERE id = ?",
+          [guru_id]
+        );
+        
+        if (guruById.length > 0) {
+          console.log("Using provided guru_id:", guru_id);
+        } else {
+          await connection.end();
+          return res.status(404).json({ 
+            error: "Guru tidak ditemukan",
+            debug: { provided_id: req.query.guru_id }
+          });
+        }
+      }
+    }
 
     let query = `
       SELECT m.*, u.nama as guru_nama, mp.nama as mata_pelajaran_nama
@@ -9253,7 +9286,6 @@ app.get("/api/materi", authenticateToken, async (req, res) => {
       params.push(mata_pelajaran_id);
     }
 
-    const connection = await getConnection();
     const [materi] = await connection.execute(query, params);
     await connection.end();
 
