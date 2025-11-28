@@ -9584,17 +9584,32 @@ app.get(
 
       const connection = await getConnection();
 
-      // Cek apakah guru termasuk dalam sekolah yang sama
-      const [guruCheck] = await connection.execute(
-        "SELECT id FROM users WHERE id = ? AND role = 'guru' AND sekolah_id = ?",
+      // Cek apakah guru ada (bisa dari user_id atau guru_id)
+      // Kita coba cari di tabel guru berdasarkan user_id dulu (karena frontend kirim user.id)
+      let guruId = id;
+      
+      const [guruByUserId] = await connection.execute(
+        "SELECT id FROM guru WHERE user_id = ? AND sekolah_id = ?",
         [id, req.sekolah_id]
       );
 
-      if (guruCheck.length === 0) {
-        await connection.end();
-        return res
-          .status(404)
-          .json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+      if (guruByUserId.length > 0) {
+        guruId = guruByUserId[0].id;
+      } else {
+        // Jika tidak ketemu by user_id, cek apakah id yang dikirim adalah guru_id
+        const [guruById] = await connection.execute(
+          "SELECT id FROM guru WHERE id = ? AND sekolah_id = ?",
+          [id, req.sekolah_id]
+        );
+        
+        if (guruById.length > 0) {
+          guruId = guruById[0].id;
+        } else {
+           await connection.end();
+           return res
+            .status(404)
+            .json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
+        }
       }
 
       // Build filter conditions
@@ -9602,7 +9617,7 @@ app.get(
         "gmp.guru_id = ?",
         "mp.sekolah_id = ?",
       ];
-      const params = [id, req.sekolah_id];
+      const params = [guruId, req.sekolah_id];
 
       const { page, limit, search, subject_ids } = req.query;
 
