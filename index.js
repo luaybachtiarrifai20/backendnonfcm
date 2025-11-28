@@ -8385,6 +8385,15 @@ app.post("/api/nilai", authenticateTokenAndSchool, async (req, res) => {
         .json({ error: "Guru tidak ditemukan atau tidak memiliki akses" });
     }
 
+    // Format date for description history
+    const today = new Date();
+    const formattedDate = `${today.getDate().toString().padStart(2, '0')}/${(today.getMonth() + 1).toString().padStart(2, '0')}/${today.getFullYear()}`;
+    
+    // Append history to description
+    const finalDeskripsi = deskripsi 
+      ? `${deskripsi}\n(Ditambahkan pada tanggal ${formattedDate})`
+      : `(Ditambahkan pada tanggal ${formattedDate})`;
+
     await connection.execute(
       "INSERT INTO nilai (id, siswa_id, guru_id, mata_pelajaran_id, jenis, nilai, deskripsi, tanggal, sekolah_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       [
@@ -8394,7 +8403,7 @@ app.post("/api/nilai", authenticateTokenAndSchool, async (req, res) => {
         mata_pelajaran_id,
         jenis,
         nilaiValue,
-        deskripsi,
+        finalDeskripsi,
         tanggal,
         req.sekolah_id,
       ]
@@ -8469,15 +8478,26 @@ app.put("/api/nilai/:id", authenticateTokenAndSchool, async (req, res) => {
       });
     }
 
+    // Format date for description history
+    const today = new Date();
+    const formattedDate = `${today.getDate().toString().padStart(2, '0')}/${(today.getMonth() + 1).toString().padStart(2, '0')}/${today.getFullYear()}`;
+    
+    // Append history to description
+    // Get existing description first to append to it? Or just append to the new description passed?
+    // Usually frontend passes the current description. We append to it.
+    const finalDeskripsi = deskripsi 
+      ? `${deskripsi}\n(Diubah pada tanggal ${formattedDate})`
+      : `(Diubah pada tanggal ${formattedDate})`;
+
     await connection.execute(
-      "UPDATE nilai SET siswa_id = ?, guru_id = ?, mata_pelajaran_id = ?, jenis = ?, nilai = ?, deskripsi = ?, tanggal = ? WHERE id = ?",
+      "UPDATE nilai SET siswa_id = ?, guru_id = ?, mata_pelajaran_id = ?, jenis = ?, nilai = ?, deskripsi = ?, tanggal = ?, updated_at = NOW() WHERE id = ?",
       [
         siswa_id,
         guru_id,
         mata_pelajaran_id,
         jenis,
         nilaiValue,
-        deskripsi,
+        finalDeskripsi,
         tanggal,
         id,
       ]
