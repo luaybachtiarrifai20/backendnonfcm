@@ -8159,7 +8159,10 @@ app.get("/api/nilai", authenticateTokenAndSchool, async (req, res) => {
     console.log("Mengambil data nilai untuk sekolah:", req.sekolah_id);
 
     let query = `
-      SELECT n.*, s.nama as siswa_nama, s.nis, mp.nama as mata_pelajaran_nama
+      SELECT n.id, n.siswa_id, n.guru_id, n.mata_pelajaran_id, n.jenis, n.nilai, n.deskripsi, 
+      DATE_FORMAT(n.tanggal, '%Y-%m-%d') as tanggal, 
+      n.sekolah_id, n.created_at, n.updated_at,
+      s.nama as siswa_nama, s.nis, mp.nama as mata_pelajaran_nama
       FROM nilai n
       JOIN siswa s ON n.siswa_id = s.id
       JOIN mata_pelajaran mp ON n.mata_pelajaran_id = mp.id
@@ -8510,6 +8513,39 @@ app.put("/api/nilai/:id", authenticateTokenAndSchool, async (req, res) => {
     console.error("ERROR PUT NILAI:", error.message);
     console.error("SQL Error code:", error.code);
     res.status(500).json({ error: "Gagal mengupdate nilai" });
+  }
+});
+
+// Delete Nilai Batch (By Jenis & Tanggal)
+app.delete("/api/nilai/batch", authenticateTokenAndSchool, async (req, res) => {
+  try {
+    const { mata_pelajaran_id, jenis, tanggal } = req.query;
+    console.log("Delete nilai batch:", { mata_pelajaran_id, jenis, tanggal });
+
+    if (!mata_pelajaran_id || !jenis || !tanggal) {
+      return res.status(400).json({ error: "Parameter tidak lengkap" });
+    }
+
+    const connection = await getConnection();
+
+    // Langsung hapus nilai berdasarkan kriteria dan sekolah_id
+    // Check mata pelajaran dihapus karena menyebabkan error 404 padahal data ada
+    // Keamanan tetap terjaga karena query DELETE menggunakan sekolah_id
+
+    const [result] = await connection.execute(
+      "DELETE FROM nilai WHERE mata_pelajaran_id = ? AND jenis = ? AND DATE(tanggal) = ? AND sekolah_id = ?",
+      [mata_pelajaran_id, jenis, tanggal, req.sekolah_id]
+    );
+    await connection.end();
+
+    console.log("Nilai batch berhasil dihapus, jumlah:", result.affectedRows);
+    res.json({ 
+      message: "Nilai berhasil dihapus", 
+      deletedCount: result.affectedRows 
+    });
+  } catch (error) {
+    console.error("ERROR DELETE NILAI BATCH:", error.message);
+    res.status(500).json({ error: "Gagal menghapus nilai batch" });
   }
 });
 
@@ -14083,6 +14119,8 @@ app.delete(
     }
   }
 );
+
+
 
 // Get jadwal untuk dropdown (disesuaikan)
 app.get(
